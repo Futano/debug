@@ -1,0 +1,73 @@
+======================================================================
+GPTDroid Bug Report - 应用崩溃报告
+======================================================================
+
+📅 崩溃时间: 2026-03-17 02:18:53
+📍 所在页面: BluetoothOppBtEnableActivity
+⚡ 触发操作: click on 'TURN ON'
+
+----------------------------------------------------------------------
+📋 测试历史（复现路径）
+----------------------------------------------------------------------
+[History of tested activities: GalleryActivity, ChooserActivity]
+[History of latest tested pages and operations: Latest 5th step tested the page ChooserActivity and performed click on icon. Latest 4th step tested the page ChooserActivity and performed click on Direct share not available [NO_EFFECT - click had no effect, button may be unclickable]. Latest 3th step tested the page ChooserActivity and performed click on resolver_list [NO_EFFECT - click had no effect, button may be unclickable]. Latest 2th step tested the page ChooserActivity and performed click on Share [NO_EFFECT - click had no effect, button may be unclickable]. Latest 1th step tested the page GalleryActivity and performed click on Share.]
+
+----------------------------------------------------------------------
+💥 崩溃堆栈
+----------------------------------------------------------------------
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: FATAL EXCEPTION: main
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: Process: com.android.bluetooth, PID: 18437
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: java.lang.RuntimeException: Unable to start activity ComponentInfo{com.android.bluetooth/com.android.bluetooth.opp.BluetoothOppBtEnablingActivity}: java.lang.NullPointerException: Attempt to invoke virtual method 'boolean android.bluetooth.BluetoothAdapter.isEnabled()' on a null object reference
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.app.ActivityThread.performLaunchActivity(ActivityThread.java:3270)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.app.ActivityThread.handleLaunchActivity(ActivityThread.java:3409)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.app.servertransaction.LaunchActivityItem.execute(LaunchActivityItem.java:83)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.app.servertransaction.TransactionExecutor.executeCallbacks(TransactionExecutor.java:135)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.app.servertransaction.TransactionExecutor.execute(TransactionExecutor.java:95)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.app.ActivityThread$H.handleMessage(ActivityThread.java:2016)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.os.Handler.dispatchMessage(Handler.java:107)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.os.Looper.loop(Looper.java:214)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.app.ActivityThread.main(ActivityThread.java:7356)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at java.lang.reflect.Method.invoke(Native Method)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:492)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:930)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: Caused by: java.lang.NullPointerException: Attempt to invoke virtual method 'boolean android.bluetooth.BluetoothAdapter.isEnabled()' on a null object reference
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at com.android.bluetooth.opp.BluetoothOppBtEnablingActivity.onCreate(BluetoothOppBtEnablingActivity.java:74)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.app.Activity.performCreate(Activity.java:7802)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.app.Activity.performCreate(Activity.java:7791)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.app.Instrumentation.callActivityOnCreate(Instrumentation.java:1299)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	at android.app.ActivityThread.performLaunchActivity(ActivityThread.java:3245)
+03-16 23:18:51.277 18437 18437 E AndroidRuntime: 	... 11 more
+03-16 23:18:51.283  2032  2367 W ActivityTaskManager:   Force finishing activity com.android.bluetooth/.opp.BluetoothOppBtEnablingActivity
+03-16 23:18:51.283  2032 18794 I DropBoxManagerService: add tag=system_app_crash isTagEnabled=true flags=0x2
+03-16 23:18:51.283  2032  2367 W InputReader: Device has associated, but no associated display id.
+03-16 23:18:51.283  2032  2367 I chatty  : uid=1000(system) Binder:2032_5 identical 8 lines
+03-16 23:18:51.283  2032  2367 W InputReader: Device has associated, but no associated display id.
+03-16 23:18:51.287 18437 18437 I Process : Sending signal. PID: 18437 SIG: 9
+03-16 23:18:51.322  2032  2125 W InputDispatcher: channel '2caa604 Toast (server)' ~ Consumer closed input channel or an error occurred.  events=0x9
+03-16 23:18:51.322  2032  2125 E InputDispatcher: channel '2caa604 Toast (server)' ~ Channel is unrecoverably broken and will be disposed!
+03-16 23:18:51.322  2032  2125 W InputDispatcher: channel '2912095 com.android.bluetooth/com.android.bluetooth.opp.BluetoothOppBtEnableActivity (server)' ~ Consumer closed input channel or an error occurred.  events=0x9
+03-16 23:18:51.322  2032  2125 E InputDispatcher: channel '2912095 com.android.bluetooth/com.android.bluetooth.opp.BluetoothOppBtEnableActivity (server)' ~ Channel is unrecoverably broken and will be disposed!
+03-16 23:18:51.330  2032  3466 I WindowManager: WIN DEATH: Window{2912095 u0 com.android.bluetooth/com.android.bluetooth.opp.BluetoothOppBtEnableActivity}
+03-16 23:18:51.330  2032  3466 W InputDispatcher: Attempted to unregister already unregistered input channel '2912095 com.android.bluetooth/com.android.bluetooth.opp.BluetoothOppBtEnableActivity (server)'
+03-16 23:18:51.333  2032 11026 I ActivityManager: Process com.android.bluetooth (pid 18437) has died: fore TOP 
+03-16 23:18:51.337  1751  1751 I Zygote  : Process 18437 exited due to signal 9 (Killed)
+03-16 23:18:51.340  2032  2502 I WindowManager: WIN DEATH: Window{2caa604 u0 Toast}
+03-16 23:18:51.340  2032  2502 W InputDispatcher: Attempted to unregister already unregistered input channel '2caa604 Toast (server)'
+03-16 23:18:51.348  2032 11026 W InputReader: Device has associated, but no associated display id.
+03-16 23:18:51.356  2032 11026 I chatty  : uid=1000(system) Binder:2032_15 identical 38 lines
+03-16 23:18:51.356  2032 11026 W InputReader: Device has associated, but no associated display id.
+03-16 23:18:51.359 14667 14667 D org.wikipedia: >>> GalleryActivity.GalleryItemFragment.show
+03-16 23:18:51.371  2032  2064 I libprocessgroup: Successfully killed process cgroup uid 1002 pid 18437 in 37ms
+03-16 23:18:51.482 14667 17662 V studio.transport: Agent handling command (id:1696 type:APP_INSPECTION) for pid:14667.
+03-16 23:18:51.496  2032  2057 W InputReader: Device has associated, but no associated display id.
+03-16 23:18:51.496  2032  2057 I chatty  : uid=1000(system) android.anim identical 8 lines
+03-16 23:18:51.496  2032  2057 W InputReader: Device has associated, but no associated display id.
+03-16 23:18:51.545 14667 17662 V studio.transport: Agent handling command (id:1697 type:APP_INSPECTION) for pid:14667.
+03-16 23:18:51.550 14667 18805 I studio.inspectors: Inspector installed: layoutinspector.view.inspection
+03-16 23:18:51.576 14667 17662 V studio.transport: Agent handling command (id:1698 type:APP_INSPECTION) for pid:14667.
+03-16 23:18:51.784  2032  2056 W ActivityTaskManager: Activity top resumed state loss timeout for ActivityRecord{7b39d3b u0 com.android.bluetooth/.opp.BluetoothOppBtEnablingActivity t-1 f}
+
+
+======================================================================
+报告生成完毕 - 请将此报告提供给开发团队
+======================================================================

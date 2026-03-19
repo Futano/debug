@@ -1,0 +1,356 @@
+"""
+大模型交互客户端模块
+封装 LLM API 调用，用于获取测试决策
+支持 OpenAI 兼容的 API（包括 OpenAI、DeepSeek 等）
+"""
+
+import os
+import sys
+from typing import Optional, Tuple
+
+# ============================================================
+# 解决 Windows 编码问题（必须在导入 openai 之前执行）
+# ============================================================
+
+# 1. 强制设置 stdout/stderr 为 UTF-8
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+# 2. 设置 Python 编码环境变量
+os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+os.environ.setdefault('PYTHONUTF8', '1')
+
+# 3. 清理代理环境变量中可能导致编码错误的非 ASCII 字符
+# 必须在导入 openai 之前执行，因为 openai 内部会读取这些变量
+_proxy_vars = [
+    'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
+    'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'
+]
+for _var in _proxy_vars:
+    _value = os.environ.get(_var, '')
+    if _value:
+        try:
+            _value.encode('ascii')
+        except UnicodeEncodeError:
+            # 直接删除，不用 safe_print（此时函数还未定义）
+            os.environ.pop(_var, None)
+
+
+def safe_print(msg: str):
+    """
+    安全打印函数，解决 Windows 终端 UnicodeEncodeError 问题
+
+    Args:
+        msg: 要打印的消息
+    """
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        # 如果 UTF-8 打印失败，尝试用 ASCII 替换不可编码字符
+        safe_msg = msg.encode('ascii', 'replace').decode('ascii')
+        print(safe_msg)
+
+# 尝试导入 OpenAI 库（可选依赖）
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+
+def clean_env_var(value: Optional[str]) -> str:
+    """
+    清理环境变量中的非法字符
+
+    Args:
+        value: 原始环境变量值
+
+    Returns:
+        清理后的字符串，去除首尾空白和不可见字符
+    """
+    if not value:
+        return ""
+    # 去除首尾空白字符
+    cleaned = value.strip()
+    # 去除可能存在的不可见字符（如零宽字符、BOM 等）
+    cleaned = ''.join(char for char in cleaned if char.isprintable())
+    return cleaned
+
+
+# 系统提示词：定义 LLM 作为 Android GUI 测试专家的角色和行为规范
+SYSTEM_PROMPT = """You are an expert Android GUI testing agent. Your goal is to achieve maximum Activity coverage and uncover bugs.
+
+CRITICAL RULES:
+1. NO HALLUCINATION: You MUST ONLY output a WidgetName that EXACTLY matches one of the widgets listed in the "The widgets which can be operated are" section of the prompt. NEVER invent, guess, or reuse widget names from past screens if they are not currently visible.
+2. NO LOOPING: Check the testing history. If your previous action failed (e.g., widget not found) or if you are stuck on the same page, you MUST try a completely different widget from the available list.
+3. AVOID NO_EFFECT WIDGETS: If a previous action is marked as [NO_EFFECT], it means the click failed or the button is unclickable. You MUST NOT interact with that widget again. Try a different widget or use Operation: "back".
+4. LEARN FROM FAILURES: Pay close attention to the testing history. If a previous action has the tag "[无效操作]" (NO_EFFECT) or "[失败]" (FAILED) next to it, it means that widget is broken, unclickable, or a dead end. You MUST NEVER attempt to interact with that specific widget again on the current screen. Pick a completely different widget, or output Operation: "back".
+5. AVOID EXPLORED PATHS: Widgets marked with "[ALREADY EXPLORED]" have been tested in previous sessions. You MUST severely deprioritize them. Always choose fresh, unmarked widgets to maximize code coverage.
+6. USE SCROLLING: If you have explored the visible widgets and suspect there is more content below, or if you want to explore a feed/list, you MUST output Operation: "scroll" Widget: "down" (to scroll down and see new items) or "up" (to scroll back up). Use scroll frequently to discover hidden content!
+7. USE BACK BUTTON: If you have fully explored the current page, or if you want to escape, output Operation: "back" Widget: "None".
+8. PRIORITIZE INPUTS: Always fill out text fields BEFORE clicking submit buttons.
+9. VALID OPERATIONS: You can ONLY choose from "click", "scroll", "back", or "input".
+10. MANDATORY OUTPUT FORMAT: You MUST strictly format your ENTIRE response EXACTLY as follows (no conversational filler):
+
+Function: <Brief description>
+Status: <Testing/New>
+Operation: "<click/scroll/back/input>"
+Widget: "<ExactWidgetName or down/up/None>"
+Input: "<text>" (Only if operation is input)
+"""
+
+
+class LLMClient:
+    """
+    大模型客户端类
+    封装与 LLM 的交互逻辑，支持 OpenAI 兼容 API 和模拟模式
+    """
+
+    # 默认安全动作：当 API 调用失败时返回
+    SAFE_FALLBACK_ACTION = 'Operation: "scroll" Widget: "None"'
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None
+    ):
+        """
+        初始化 LLM 客户端
+
+        配置优先级：参数 > 环境变量 > 默认值
+
+        Args:
+            api_key: API Key，如果不提供则从环境变量 OPENAI_API_KEY 读取
+            base_url: API 基础 URL，支持切换 OpenAI/DeepSeek 等不同服务
+                      如果不提供则从环境变量 OPENAI_BASE_URL 读取
+            model: 使用的模型名称，默认从环境变量读取或使用 gpt-3.5-turbo
+        """
+        # 从环境变量或参数读取配置，并清理非法字符
+        self.api_key = clean_env_var(api_key or os.environ.get("OPENAI_API_KEY"))
+        self.base_url = clean_env_var(base_url or os.environ.get("OPENAI_BASE_URL"))
+        self.model = clean_env_var(model or os.environ.get("OPENAI_MODEL", "gpt-3.5-turbo"))
+
+        self.client = None
+        self._is_mock_mode = True
+
+        # 检查 OpenAI 库是否可用
+        if not OPENAI_AVAILABLE:
+            safe_print("[LLM客户端] 警告: openai 库未安装，将使用模拟模式")
+            safe_print("[LLM客户端] 提示: 请运行 'pip install openai' 安装依赖")
+            return
+
+        # 检查 API Key
+        if not self.api_key:
+            safe_print("[LLM客户端] 警告: 未检测到 OPENAI_API_KEY，将使用模拟模式")
+            safe_print("[LLM客户端] 提示: 请设置环境变量 OPENAI_API_KEY")
+            return
+
+        # 初始化 OpenAI 客户端
+        try:
+            # 如果提供了 base_url，则使用自定义端点（支持 DeepSeek 等）
+            if self.base_url:
+                self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+                safe_print(f"[LLM客户端] 使用自定义 API 端点: {self.base_url}")
+            else:
+                self.client = OpenAI(api_key=self.api_key)
+
+            self._is_mock_mode = False
+
+            safe_print(f"[LLM客户端] 初始化成功")
+            safe_print(f"[LLM客户端] 模型: {self.model}")
+            safe_print(f"[LLM客户端] 模式: {'模拟模式' if self._is_mock_mode else '真实 API 模式'}")
+
+        except Exception as e:
+            safe_print(f"[LLM客户端] 初始化失败: {e}")
+            safe_print("[LLM客户端] 将使用模拟模式")
+            self.client = None
+            self._is_mock_mode = True
+
+    def get_decision(self, prompt: str) -> str:
+        """
+        根据提示词获取 LLM 的测试决策
+
+        Args:
+            prompt: 构建好的测试提示词，包含 GUI 上下文和测试历史
+
+        Returns:
+            LLM 的响应字符串，格式示例：
+            - 'Operation: "click" Widget: "Search"'
+            - 'Widget: "SearchBox" Input: "test"'
+        """
+        if self._is_mock_mode or not self.client:
+            return self._get_mock_response(prompt)
+
+        return self._call_llm_api(prompt)
+
+    def _call_llm_api(self, prompt: str) -> str:
+        """
+        调用 LLM API 获取真实响应
+
+        包含完善的异常处理，确保在任何错误情况下都返回安全的默认动作
+
+        Args:
+            prompt: 测试提示词
+
+        Returns:
+            LLM 响应字符串，失败时返回安全默认动作
+        """
+        try:
+            safe_print("[LLM客户端] 正在调用 API...")
+
+            # 安全编码 Prompt：强制 UTF-8 转换，确保所有字符都能被网络库接受
+            # 使用 'ignore' 忽略无法编码的字符，避免 UnicodeEncodeError
+            safe_prompt = prompt.encode('utf-8', 'ignore').decode('utf-8')
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SYSTEM_PROMPT
+                    },
+                    {
+                        "role": "user",
+                        "content": safe_prompt
+                    }
+                ],
+                temperature=0.3,  # 降低随机性，提高决策一致性
+                max_tokens=150    # 足够输出操作指令
+            )
+
+            # 提取响应内容
+            if response.choices and len(response.choices) > 0:
+                result = response.choices[0].message.content.strip()
+                safe_print(f"[LLM客户端] API 响应: {result}")
+                return result
+            else:
+                safe_print("[LLM客户端] API 返回空响应，使用安全默认动作")
+                return self.SAFE_FALLBACK_ACTION
+
+        except Exception as e:
+            # 详细的错误处理
+            error_type = type(e).__name__
+            safe_print(f"[LLM客户端] API 调用失败 [{error_type}]: {e}")
+
+            # 根据错误类型提供更具体的提示
+            if "UnicodeEncodeError" in error_type or "unicode" in str(e).lower():
+                safe_print("[LLM客户端] 提示: 编码错误，已尝试安全编码但仍失败，请检查 Prompt 内容")
+            elif "authentication" in str(e).lower() or "api_key" in str(e).lower():
+                safe_print("[LLM客户端] 提示: 请检查 API Key 是否正确")
+            elif "rate" in str(e).lower() or "limit" in str(e).lower():
+                safe_print("[LLM客户端] 提示: 请求频率超限，请稍后重试")
+            elif "timeout" in str(e).lower():
+                safe_print("[LLM客户端] 提示: 请求超时，请检查网络连接")
+            elif "connection" in str(e).lower():
+                safe_print("[LLM客户端] 提示: 网络连接失败，请检查网络设置")
+
+            # 返回安全的默认动作，防止程序崩溃
+            safe_print(f"[LLM客户端] 使用安全默认动作: {self.SAFE_FALLBACK_ACTION}")
+            return self.SAFE_FALLBACK_ACTION
+
+    def _get_mock_response(self, prompt: str) -> str:
+        """
+        生成模拟的 LLM 响应（用于测试和离线模式）
+
+        模拟策略：分析 prompt 中的控件信息，返回第一个可点击控件
+
+        Args:
+            prompt: 测试提示词
+
+        Returns:
+            模拟的响应字符串
+        """
+        safe_print("[LLM客户端] 使用模拟模式返回测试决策")
+
+        # 尝试从 prompt 中提取控件名称
+        import re
+
+        # 提取 "The widgets which can be operated are" 后面的控件列表
+        widgets_match = re.search(
+            r'The widgets which can be operated are ([^.]+)\.',
+            prompt
+        )
+
+        if widgets_match:
+            widgets_str = widgets_match.group(1)
+            # 提取第一个控件名
+            widgets = [w.strip().strip(',') for w in widgets_str.split(',') if w.strip()]
+            if widgets:
+                first_widget = widgets[0]
+                mock_response = f'Operation: "click" Widget: "{first_widget}"'
+                safe_print(f"[LLM客户端] 模拟响应: {mock_response}")
+                return mock_response
+
+        # 默认模拟响应
+        mock_response = 'Operation: "click" Widget: "Search"'
+        safe_print(f"[LLM客户端] 模拟响应: {mock_response}")
+        return mock_response
+
+    def is_mock_mode(self) -> bool:
+        """
+        检查是否处于模拟模式
+
+        Returns:
+            True 表示模拟模式，False 表示真实 API 模式
+        """
+        return self._is_mock_mode
+
+    def test_connection(self) -> Tuple[bool, str]:
+        """
+        测试 API 连接是否正常
+
+        Returns:
+            元组 (是否成功, 状态消息)
+        """
+        if self._is_mock_mode:
+            return False, "模拟模式，未配置 API"
+
+        try:
+            # 发送一个简单的测试请求（使用安全编码）
+            test_content = "Say 'OK' if you can hear me.".encode('utf-8', 'ignore').decode('utf-8')
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": test_content}
+                ],
+                max_tokens=10
+            )
+
+            if response.choices:
+                return True, f"API 连接正常，模型: {self.model}"
+            else:
+                return False, "API 返回异常响应"
+
+        except Exception as e:
+            return False, f"API 连接失败: {e}"
+
+
+# 测试入口
+if __name__ == "__main__":
+    safe_print("=" * 60)
+    safe_print("LLM 客户端测试")
+    safe_print("=" * 60)
+
+    # 创建客户端
+    client = LLMClient()
+
+    # 测试连接
+    safe_print("\n[测试连接]")
+    success, message = client.test_connection()
+    safe_print(f"状态: {message}")
+
+    # 测试决策
+    safe_print("\n[测试决策]")
+    test_prompt = """The current page is MainActivity, it has Search, Login, Register.
+The upper part of the app is Search, the lower part is Login, Register.
+The widgets which can be operated are Search, Login, Register.
+What operation is required? (<Operation>[click/double-click/long press/scroll]+<Widget Name>)"""
+
+    response = client.get_decision(test_prompt)
+    safe_print(f"\n最终响应: {response}")

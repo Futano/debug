@@ -1,0 +1,60 @@
+======================================================================
+GPTDroid Bug Report - 应用崩溃报告
+======================================================================
+
+📅 崩溃时间: 2026-03-16 02:29:23
+📍 所在页面: AccountSetupFinal
+⚡ 触发操作: click on 'MANUAL'
+
+----------------------------------------------------------------------
+📋 测试历史（复现路径）
+----------------------------------------------------------------------
+[History of tested activities: None]
+[History of latest tested pages and operations: None]
+
+----------------------------------------------------------------------
+💥 崩溃堆栈
+----------------------------------------------------------------------
+03-15 23:29:17.592  6742  6742 D AndroidRuntime: >>>>>> START com.android.internal.os.RuntimeInit uid 2000 <<<<<<
+03-15 23:29:17.594  6742  6742 E libc    : Access denied finding property "persist.device_config.runtime_native_boot.enable_apex_image"
+03-15 23:29:17.594  6742  6742 I AndroidRuntime: Using default boot image
+03-15 23:29:17.594  6742  6742 E libc    : Access denied finding property "persist.device_config.runtime_native_boot.disable_lock_profiling"
+03-15 23:29:17.594  6742  6742 I AndroidRuntime: Leaving lock profiling enabled
+03-15 23:29:17.594  6742  6742 E libc    : Access denied finding property "persist.device_config.runtime_native_boot.enable_generational_cc"
+03-15 23:29:17.595  6742  6742 I app_process: Core platform API reporting enabled, enforcing=false
+03-15 23:29:17.623  6742  6742 D ICU     : Time zone APEX file found: /apex/com.android.tzdata/etc/icu/icu_tzdata.dat
+03-15 23:29:17.625  6742  6742 W app_process: Unexpected CPU variant for X86 using defaults: x86_64
+03-15 23:29:17.628  6742  6742 I app_process: The ClassLoaderContext is a special shared library.
+03-15 23:29:17.628  6742  6742 I app_process: The ClassLoaderContext is a special shared library.
+03-15 23:29:17.635  6742  6742 W app_process: JNI RegisterNativeMethods: attempt to register 0 native methods for android.media.AudioAttributes
+03-15 23:29:17.637  6742  6742 D AndroidRuntime: Calling main entry com.android.commands.uiautomator.Launcher
+--------- beginning of system
+03-15 23:29:17.642  2032  2032 V SettingsProvider: Notifying for 0: content://settings/secure/accessibility_enabled
+03-15 23:29:17.663  2172  2485 D EGL_emulation: eglMakeCurrent: 0x737b9fa0cfc0: ver 2 0 (tinfo 0x737be9f9d920)
+03-15 23:29:18.653  6742  6742 I AccessibilityNodeInfoDumper: Skipping invisible child: android.view.accessibility.AccessibilityNodeInfo@25ab1; boundsInParent: Rect(0, 0 - 0, 154); boundsInScreen: Rect(1080, 171 - 1080, 325); packageName: com.android.email; className: android.widget.LinearLayout; text: null; error: null; maxTextLength: -1; contentDescription: null; tooltipText: null; viewIdResName: null; checkable: false; checked: false; focusable: false; focused: false; selected: false; clickable: false; longClickable: false; contextClickable: false; enabled: true; password: false; scrollable: false; importantForAccessibility: false; visible: false; actions: [AccessibilityAction: ACTION_SELECT - null, AccessibilityAction: ACTION_CLEAR_SELECTION - null, AccessibilityAction: ACTION_ACCESSIBILITY_FOCUS - null, AccessibilityAction: ACTION_SHOW_ON_SCREEN - null]
+03-15 23:29:18.654  6742  6742 I AccessibilityNodeInfoDumper: Skipping invisible child: android.view.accessibility.AccessibilityNodeInfo@22262; boundsInParent: Rect(0, 0 - 0, 0); boundsInScreen: Rect(66, 369 - 66, 369); packageName: com.android.email; className: android.view.View; text: null; error: null; maxTextLength: -1; contentDescription: null; tooltipText: null; viewIdResName: null; checkable: false; checked: false; focusable: true; focused: false; selected: false; clickable: false; longClickable: false; contextClickable: false; enabled: true; password: false; scrollable: false; importantForAccessibility: false; visible: false; actions: [AccessibilityAction: ACTION_FOCUS - null, AccessibilityAction: ACTION_SELECT - null, AccessibilityAction: ACTION_CLEAR_SELECTION - null, AccessibilityAction: ACTION_ACCESSIBILITY_FOCUS - null, AccessibilityAction: ACTION_SHOW_ON_SCREEN - null]
+03-15 23:29:18.656  6742  6742 W AccessibilityNodeInfoDumper: Fetch time: 3ms
+03-15 23:29:18.657  2032  6345 W WindowManager: removeWindowToken: Attempted to remove non-existing token: android.os.Binder@d987c23
+03-15 23:29:18.658  2032  2032 V SettingsProvider: Notifying for 0: content://settings/secure/accessibility_enabled
+03-15 23:29:18.660  6742  6742 D AndroidRuntime: Shutting down VM
+03-15 23:29:21.860  6763  6763 W app_process: type=1400 audit(0.0:460): avc: denied { read } for name="u:object_r:device_config_runtime_native_boot_prop:s0" dev="tmpfs" ino=173 scontext=u:r:shell:s0 tcontext=u:object_r:device_config_runtime_native_boot_prop:s0 tclass=file permissive=0
+03-15 23:29:21.860  6763  6763 W app_process: type=1400 audit(0.0:461): avc: denied { read } for name="u:object_r:device_config_runtime_native_boot_prop:s0" dev="tmpfs" ino=173 scontext=u:r:shell:s0 tcontext=u:object_r:device_config_runtime_native_boot_prop:s0 tclass=file permissive=0
+03-15 23:29:21.860  6763  6763 W app_process: type=1400 audit(0.0:462): avc: denied { read } for name="u:object_r:device_config_runtime_native_boot_prop:s0" dev="tmpfs" ino=173 scontext=u:r:shell:s0 tcontext=u:object_r:device_config_runtime_native_boot_prop:s0 tclass=file permissive=0
+03-15 23:29:21.870  6763  6763 D AndroidRuntime: >>>>>> START com.android.internal.os.RuntimeInit uid 2000 <<<<<<
+03-15 23:29:21.872  6763  6763 E libc    : Access denied finding property "persist.device_config.runtime_native_boot.enable_apex_image"
+03-15 23:29:21.872  6763  6763 I AndroidRuntime: Using default boot image
+03-15 23:29:21.873  6763  6763 E libc    : Access denied finding property "persist.device_config.runtime_native_boot.disable_lock_profiling"
+03-15 23:29:21.873  6763  6763 I AndroidRuntime: Leaving lock profiling enabled
+03-15 23:29:21.873  6763  6763 E libc    : Access denied finding property "persist.device_config.runtime_native_boot.enable_generational_cc"
+03-15 23:29:21.873  6763  6763 I app_process: Core platform API reporting enabled, enforcing=false
+03-15 23:29:21.900  6763  6763 D ICU     : Time zone APEX file found: /apex/com.android.tzdata/etc/icu/icu_tzdata.dat
+03-15 23:29:21.902  6763  6763 W app_process: Unexpected CPU variant for X86 using defaults: x86_64
+03-15 23:29:21.904  6763  6763 I app_process: The ClassLoaderContext is a special shared library.
+03-15 23:29:21.911  6763  6763 W app_process: JNI RegisterNativeMethods: attempt to register 0 native methods for android.media.AudioAttributes
+03-15 23:29:21.912  6763  6763 D AndroidRuntime: Calling main entry com.android.commands.input.Input
+03-15 23:29:21.916  6763  6763 D AndroidRuntime: Shutting down VM
+
+
+======================================================================
+报告生成完毕 - 请将此报告提供给开发团队
+======================================================================

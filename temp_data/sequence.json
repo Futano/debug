@@ -1,0 +1,34 @@
+[
+    {
+        "step": 1,
+        "package_name": "com.android.quicksearchbox",
+        "target_function": "Search",
+        "expected_operation": "click",
+        "description": "点击搜索框，准备输入搜索内容",
+        "expected_widget": "search_src_text"
+    },
+    {
+        "step": 2,
+        "package_name": "com.android.quicksearchbox",
+        "target_function": "Search",
+        "expected_operation": "input",
+        "description": "在搜索框中输入查询内容",
+        "expected_widget": "search_src_text"
+    },
+    {
+        "step": 3,
+        "package_name": "com.android.quicksearchbox",
+        "target_function": "Search",
+        "expected_operation": "click",
+        "description": "点击搜索建议或确认按钮，执行搜索",
+        "expected_widget": "SearchButton"
+    },
+    {
+        "step": 4,
+        "package_name": "com.android.quicksearchbox",
+        "target_function": "View Results",
+        "expected_operation": "click",
+        "description": "点击搜索结果中的某一项",
+        "expected_widget": "ResultItem"
+    }
+]

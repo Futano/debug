@@ -1,0 +1,125 @@
+======================================================================
+GPTDroid Bug Report - 应用崩溃报告
+======================================================================
+
+📅 崩溃时间: 2026-03-16 02:27:04
+📍 所在页面: Launcher
+⚡ 触发操作: click on 'Email'
+
+----------------------------------------------------------------------
+📋 测试历史（复现路径）
+----------------------------------------------------------------------
+[History of tested activities: None]
+[History of latest tested pages and operations: None]
+
+----------------------------------------------------------------------
+💥 崩溃堆栈
+----------------------------------------------------------------------
+03-15 23:26:57.910  6700  6700 D AndroidRuntime: >>>>>> START com.android.internal.os.RuntimeInit uid 2000 <<<<<<
+03-15 23:26:57.900  6700  6700 W app_process: type=1400 audit(0.0:451): avc: denied { read } for name="u:object_r:device_config_runtime_native_boot_prop:s0" dev="tmpfs" ino=173 scontext=u:r:shell:s0 tcontext=u:object_r:device_config_runtime_native_boot_prop:s0 tclass=file permissive=0
+03-15 23:26:57.900  6700  6700 W app_process: type=1400 audit(0.0:452): avc: denied { read } for name="u:object_r:device_config_runtime_native_boot_prop:s0" dev="tmpfs" ino=173 scontext=u:r:shell:s0 tcontext=u:object_r:device_config_runtime_native_boot_prop:s0 tclass=file permissive=0
+03-15 23:26:57.911  6700  6700 E libc    : Access denied finding property "persist.device_config.runtime_native_boot.enable_apex_image"
+03-15 23:26:57.911  6700  6700 I AndroidRuntime: Using default boot image
+03-15 23:26:57.911  6700  6700 E libc    : Access denied finding property "persist.device_config.runtime_native_boot.disable_lock_profiling"
+03-15 23:26:57.911  6700  6700 I AndroidRuntime: Leaving lock profiling enabled
+03-15 23:26:57.900  6700  6700 W app_process: type=1400 audit(0.0:453): avc: denied { read } for name="u:object_r:device_config_runtime_native_boot_prop:s0" dev="tmpfs" ino=173 scontext=u:r:shell:s0 tcontext=u:object_r:device_config_runtime_native_boot_prop:s0 tclass=file permissive=0
+03-15 23:26:57.912  6700  6700 E libc    : Access denied finding property "persist.device_config.runtime_native_boot.enable_generational_cc"
+03-15 23:26:57.912  6700  6700 I app_process: Core platform API reporting enabled, enforcing=false
+03-15 23:26:57.941  6700  6700 D ICU     : Time zone APEX file found: /apex/com.android.tzdata/etc/icu/icu_tzdata.dat
+03-15 23:26:57.943  6700  6700 W app_process: Unexpected CPU variant for X86 using defaults: x86_64
+03-15 23:26:57.944  6700  6700 I app_process: The ClassLoaderContext is a special shared library.
+03-15 23:26:57.945  6700  6700 I app_process: The ClassLoaderContext is a special shared library.
+03-15 23:26:57.957  6700  6700 W app_process: JNI RegisterNativeMethods: attempt to register 0 native methods for android.media.AudioAttributes
+03-15 23:26:57.959  6700  6700 D AndroidRuntime: Calling main entry com.android.commands.uiautomator.Launcher
+--------- beginning of system
+03-15 23:26:47.109  2032  2055 I DropBoxManagerService: add tag=system_app_strictmode isTagEnabled=true flags=0x2
+03-15 23:26:57.965  2032  2032 V SettingsProvider: Notifying for 0: content://settings/secure/accessibility_enabled
+03-15 23:26:58.981  6700  6700 I AccessibilityNodeInfoDumper: Skipping invisible child: android.view.accessibility.AccessibilityNodeInfo@117d3; boundsInParent: Rect(0, 0 - 206, 171); boundsInScreen: Rect(822, 2214 - 1028, 2280); packageName: com.android.launcher3; className: android.widget.TextView; text: null; error: null; maxTextLength: -1; contentDescription: null; tooltipText: null; viewIdResName: com.android.launcher3:id/fast_scroller_popup; checkable: false; checked: false; focusable: false; focused: false; selected: false; clickable: false; longClickable: false; contextClickable: false; enabled: true; password: false; scrollable: false; importantForAccessibility: false; visible: false; actions: [AccessibilityAction: ACTION_SELECT - null, AccessibilityAction: ACTION_CLEAR_SELECTION - null, AccessibilityAction: ACTION_ACCESSIBILITY_FOCUS - null, AccessibilityAction: ACTION_SHOW_ON_SCREEN - null]
+03-15 23:26:58.982  6700  6700 W AccessibilityNodeInfoDumper: Fetch time: 3ms
+03-15 23:26:58.983  2032  6346 W WindowManager: removeWindowToken: Attempted to remove non-existing token: android.os.Binder@ff7f9c1
+03-15 23:26:58.983  2032  2032 V SettingsProvider: Notifying for 0: content://settings/secure/accessibility_enabled
+03-15 23:26:58.986  6700  6700 D AndroidRuntime: Shutting down VM
+03-15 23:27:00.002  2172  2172 D KeyguardClockSwitch: Updating clock: 1127
+03-15 23:27:00.008  2172  2485 D EGL_emulation: eglMakeCurrent: 0x737b9fa0cfc0: ver 2 0 (tinfo 0x737be9f9d920)
+03-15 23:27:02.805  6720  6720 D AndroidRuntime: >>>>>> START com.android.internal.os.RuntimeInit uid 2000 <<<<<<
+03-15 23:27:02.790  6720  6720 W app_process: type=1400 audit(0.0:454): avc: denied { read } for name="u:object_r:device_config_runtime_native_boot_prop:s0" dev="tmpfs" ino=173 scontext=u:r:shell:s0 tcontext=u:object_r:device_config_runtime_native_boot_prop:s0 tclass=file permissive=0
+03-15 23:27:02.790  6720  6720 I chatty  : uid=2000(shell) app_process identical 1 line
+03-15 23:27:02.790  6720  6720 W app_process: type=1400 audit(0.0:456): avc: denied { read } for name="u:object_r:device_config_runtime_native_boot_prop:s0" dev="tmpfs" ino=173 scontext=u:r:shell:s0 tcontext=u:object_r:device_config_runtime_native_boot_prop:s0 tclass=file permissive=0
+03-15 23:27:02.806  6720  6720 E libc    : Access denied finding property "persist.device_config.runtime_native_boot.enable_apex_image"
+03-15 23:27:02.806  6720  6720 I AndroidRuntime: Using default boot image
+03-15 23:27:02.806  6720  6720 E libc    : Access denied finding property "persist.device_config.runtime_native_boot.disable_lock_profiling"
+03-15 23:27:02.806  6720  6720 I AndroidRuntime: Leaving lock profiling enabled
+03-15 23:27:02.807  6720  6720 E libc    : Access denied finding property "persist.device_config.runtime_native_boot.enable_generational_cc"
+03-15 23:27:02.808  6720  6720 I app_process: Core platform API reporting enabled, enforcing=false
+03-15 23:27:02.833  6720  6720 D ICU     : Time zone APEX file found: /apex/com.android.tzdata/etc/icu/icu_tzdata.dat
+03-15 23:27:02.834  6720  6720 W app_process: Unexpected CPU variant for X86 using defaults: x86_64
+03-15 23:27:02.838  6720  6720 I app_process: The ClassLoaderContext is a special shared library.
+03-15 23:27:02.843  6720  6720 W app_process: JNI RegisterNativeMethods: attempt to register 0 native methods for android.media.AudioAttributes
+03-15 23:27:02.844  6720  6720 D AndroidRuntime: Calling main entry com.android.commands.input.Input
+03-15 23:27:02.849  6720  6720 D AndroidRuntime: Shutting down VM
+03-15 23:27:02.861  2032  6346 I ActivityTaskManager: START u0 {act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10200000 pkg=com.android.email cmp=com.android.email/.activity.Welcome bnds=[38,1437][239,1748]} from uid 10100
+03-15 23:27:02.866  1758  3662 W audio_hw_generic: Not supplying enough data to HAL, expected position 2045803 , only wrote 2045795
+03-15 23:27:02.869  2032  6342 W InputReader: Device has associated, but no associated display id.
+03-15 23:27:02.870  2032  6342 I chatty  : uid=1000(system) Binder:2032_10 identical 28 lines
+03-15 23:27:02.870  2032  6342 W InputReader: Device has associated, but no associated display id.
+03-15 23:27:02.880  2032  2328 W InputReader: Device has associated, but no associated display id.
+03-15 23:27:02.880  2032  2328 I chatty  : uid=1000(system) Binder:2032_4 identical 8 lines
+03-15 23:27:02.880  2032  2328 W InputReader: Device has associated, but no associated display id.
+03-15 23:27:02.895  1768  1833 D gralloc_ranchu: gralloc_alloc: Creating ashmem region of size 9850880
+03-15 23:27:02.920  1768  1833 D gralloc_ranchu: gralloc_alloc: Creating ashmem region of size 9850880
+03-15 23:27:02.923  1769  1922 W EmuHWC2 : validate: layer 38 CompositionType 1, fallback
+03-15 23:27:02.949  6391  6441 D EGL_emulation: eglMakeCurrent: 0x737beba4b9e0: ver 2 0 (tinfo 0x737bebaba4c0)
+03-15 23:27:02.959  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0a900
+03-15 23:27:02.960  1769  1922 W EmuHWC2 : validate: layer 38 CompositionType 1, fallback
+03-15 23:27:02.973  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0ad20
+03-15 23:27:02.973  1769  1922 W EmuHWC2 : validate: layer 38 CompositionType 1, fallback
+03-15 23:27:02.985  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0a840
+03-15 23:27:02.990  1769  1922 W EmuHWC2 : validate: layer 38 CompositionType 1, fallback
+03-15 23:27:03.007  1768  1833 D gralloc_ranchu: gralloc_alloc: Creating ashmem region of size 9850880
+03-15 23:27:03.043  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0a900
+03-15 23:27:03.044  1769  1922 W EmuHWC2 : validate: layer 38 CompositionType 1, fallback
+03-15 23:27:03.081  1769  1769 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0ad20
+03-15 23:27:03.082  1769  1769 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.088  1769  1769 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0a840
+03-15 23:27:03.089  1769  1922 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.094  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0a900
+03-15 23:27:03.095  2526  2526 I LatinIME: Starting input. Cursor position = 0,0
+03-15 23:27:03.108  1769  1922 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.110  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0ad20
+03-15 23:27:03.120  1768  1833 D gralloc_ranchu: gralloc_alloc: Creating ashmem region of size 9113600
+03-15 23:27:03.123  1769  1922 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.147  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0a840
+03-15 23:27:03.148  1769  1922 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.156  2172  2485 D EGL_emulation: eglMakeCurrent: 0x737b9fa0cfc0: ver 2 0 (tinfo 0x737be9f9d920)
+03-15 23:27:03.159  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0a900
+03-15 23:27:03.160  1768  1833 D gralloc_ranchu: gralloc_alloc: Creating ashmem region of size 9113600
+03-15 23:27:03.164  2526  3848 D EGL_emulation: eglMakeCurrent: 0x737ba028c960: ver 2 0 (tinfo 0x737ba04514e0)
+03-15 23:27:03.173  1769  1922 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.189  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0ad20
+03-15 23:27:03.189  1768  1833 D gralloc_ranchu: gralloc_alloc: Creating ashmem region of size 9113600
+03-15 23:27:03.190  1769  1769 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.215  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0a840
+03-15 23:27:03.215  1769  1922 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.222  1769  1769 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0a900
+03-15 23:27:03.225  1769  1922 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.230  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0ad20
+03-15 23:27:03.241  1769  1922 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.242  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0a840
+03-15 23:27:03.257  1769  1922 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.258  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0a900
+03-15 23:27:03.273  1769  1922 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.274  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0ad20
+03-15 23:27:03.291  1769  1922 W EmuHWC2 : validate: layer 39 CompositionType 1, fallback
+03-15 23:27:03.292  1769  1922 W EmuHWC2 : No layers, exit, buffer 0x7037cdc0a840
+03-15 23:27:03.357  1797  1797 E Layer   : [Surface(name=AppWindowToken{aaa0fed token=Token{6737e04 ActivityRecord{59a0a17 u0 com.android.email/.activity.setup.AccountSetupFinal t14}}})/@0xd565c06 - animation-leash#0] No local sync point found
+03-15 23:27:03.357  1797  1797 E Layer   : [Surface(name=AppWindowToken{aaa0fed token=Token{6737e04 ActivityRecord{59a0a17 u0 com.android.email/.activity.setup.AccountSetupFinal t14}}})/@0xd565c06 - animation-leash#0] No local sync point found
+03-15 23:27:03.358  1797  1797 E Layer   : [Surface(name=AppWindowToken{b71626d token=Token{c528a84 ActivityRecord{f937897 u0 com.android.launcher3/.Launcher t10}}})/@0xd3ff56b - animation-leash#0] No local sync point found
+03-15 23:27:03.358  1797  1797 E Layer   : [Surface(name=AppWindowToken{b71626d token=Token{c528a84 ActivityRecord{f937897 u0 com.android.launcher3/.Launcher t10}}})/@0xd3ff56b - animation-leash#0] No local sync point found
+03-15 23:27:03.372  1797  1797 E Layer   : [Surface(name=AppWindowToken{aaa0fed token=Token{6737e04 ActivityRecord{59a0a17 u0 com.android.email/.activity.setup.AccountSetupFinal t14}}})/@0xd565c06 - animation-leash#0] No local sync point found
+03-15 23:27:03.372  1797  1797 E Layer   : [Surface(name=AppWindowToken{b71626d token=Token{c528a84 ActivityRecord{f937897 u0 com.android.launcher3/.Launcher t10}}})/@0xd3ff56b - animation-leash#0] No local sync point found
+03-15 23:27:03.376  3754  3786 D EGL_emulation: eglMakeCurrent: 0x737ba04caac0: ver 2 0 (tinfo 0x737be9e10640)
+
+
+======================================================================
+报告生成完毕 - 请将此报告提供给开发团队
+======================================================================
