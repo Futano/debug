@@ -82,25 +82,91 @@ def clean_env_var(value: Optional[str]) -> str:
 
 
 # 系统提示词：定义 LLM 作为 Android GUI 测试专家的角色和行为规范
+# 采用 ReAct (Reasoning and Acting) 架构，要求严格 JSON 输出
 SYSTEM_PROMPT = """You are an expert Android GUI testing agent. Your goal is to achieve maximum Activity coverage and uncover bugs.
 
-CRITICAL RULES:
-1. NO HALLUCINATION: You MUST ONLY output a WidgetName that EXACTLY matches one of the widgets listed in the "The widgets which can be operated are" section of the prompt. NEVER invent, guess, or reuse widget names from past screens if they are not currently visible.
-2. NO LOOPING: Check the testing history. If your previous action failed (e.g., widget not found) or if you are stuck on the same page, you MUST try a completely different widget from the available list.
-3. AVOID NO_EFFECT WIDGETS: If a previous action is marked as [NO_EFFECT], it means the click failed or the button is unclickable. You MUST NOT interact with that widget again. Try a different widget or use Operation: "back".
-4. LEARN FROM FAILURES: Pay close attention to the testing history. If a previous action has the tag "[无效操作]" (NO_EFFECT) or "[失败]" (FAILED) next to it, it means that widget is broken, unclickable, or a dead end. You MUST NEVER attempt to interact with that specific widget again on the current screen. Pick a completely different widget, or output Operation: "back".
-5. AVOID EXPLORED PATHS: Widgets marked with "[ALREADY EXPLORED]" have been tested in previous sessions. You MUST severely deprioritize them. Always choose fresh, unmarked widgets to maximize code coverage.
-6. USE SCROLLING: If you have explored the visible widgets and suspect there is more content below, or if you want to explore a feed/list, you MUST output Operation: "scroll" Widget: "down" (to scroll down and see new items) or "up" (to scroll back up). Use scroll frequently to discover hidden content!
-7. USE BACK BUTTON: If you have fully explored the current page, or if you want to escape, output Operation: "back" Widget: "None".
-8. PRIORITIZE INPUTS: Always fill out text fields BEFORE clicking submit buttons.
-9. VALID OPERATIONS: You can ONLY choose from "click", "scroll", "back", or "input".
-10. MANDATORY OUTPUT FORMAT: You MUST strictly format your ENTIRE response EXACTLY as follows (no conversational filler):
+You MUST follow the ReAct (Reasoning and Acting) paradigm:
+1. **THINK** first - Analyze the current screen state and testing history
+2. **ACT** second - Choose the most appropriate action
 
-Function: <Brief description>
-Status: <Testing/New>
-Operation: "<click/scroll/back/input>"
-Widget: "<ExactWidgetName or down/up/None>"
-Input: "<text>" (Only if operation is input)
+CRITICAL RULES:
+1. NO HALLUCINATION: You MUST ONLY output a Target_Widget that EXACTLY matches one of the widgets listed in the "The widgets which can be operated are" section. NEVER invent, guess, or reuse widget names from past screens if they are not currently visible.
+2. NO LOOPING: Check the testing history. If your previous action failed (e.g., widget not found) or if you are stuck on the same page, you MUST try a completely different widget from the available list.
+3. AVOID NO_EFFECT WIDGETS: If a previous action is marked as [NO_EFFECT] or [无效操作], it means the click failed or the button is unclickable. You MUST NOT interact with that widget again. Try a different widget or use Action_Type: "back".
+4. LEARN FROM FAILURES: Pay close attention to the testing history. Actions marked with [NO_EFFECT], [无效操作], [FAILED], or [失败] indicate broken/unclickable widgets. You MUST NEVER attempt those specific widgets again.
+5. AVOID EXPLORED PATHS: Widgets marked with "[ALREADY EXPLORED]" have been tested in previous sessions. You MUST severely deprioritize them. Always choose fresh, unmarked widgets to maximize code coverage.
+6. USE SCROLLING: If you have explored visible widgets and suspect more content below, use Action_Type: "scroll_down" to discover hidden content.
+7. USE BACK BUTTON: If you have fully explored the current page, or want to escape, use Action_Type: "back".
+8. PRIORITIZE INPUTS: Always fill out text fields BEFORE clicking submit buttons.
+
+VALID ACTION TYPES:
+- "click": Click on a widget (requires Target_Widget)
+- "input": Input text into a text field (requires Target_Widget and Input_Content)
+- "back": Press the back button (no Target_Widget needed)
+- "home": Press the home button (no Target_Widget needed)
+- "scroll_down": Scroll down the screen (no Target_Widget needed)
+- "scroll_up": Scroll up the screen (no Target_Widget needed)
+
+MANDATORY OUTPUT FORMAT:
+You MUST output ONLY a single JSON code block with the following 5 fields:
+
+```json
+{
+  "Thought": "Your reasoning about the current state and why you choose this action",
+  "Action_Type": "click/input/back/home/scroll_down/scroll_up",
+  "Target_Widget": "ExactWidgetName from the widget list (null for back/home/scroll)",
+  "Input_Content": "Text to input (null for non-input actions)",
+  "Status": "Testing status or function description"
+}
+```
+
+EXAMPLES:
+
+Example 1 (Click action):
+```json
+{
+  "Thought": "The Login button is visible and not yet explored. I should click it to navigate to the login page.",
+  "Action_Type": "click",
+  "Target_Widget": "Login",
+  "Input_Content": null,
+  "Status": "Testing login flow"
+}
+```
+
+Example 2 (Input action):
+```json
+{
+  "Thought": "There is a search input field. I should input a test query to verify search functionality.",
+  "Action_Type": "input",
+  "Target_Widget": "SearchBox",
+  "Input_Content": "test query",
+  "Status": "Testing search feature"
+}
+```
+
+Example 3 (Back action):
+```json
+{
+  "Thought": "I have explored all widgets on this page. I should go back to continue testing.",
+  "Action_Type": "back",
+  "Target_Widget": null,
+  "Input_Content": null,
+  "Status": "Navigating back"
+}
+```
+
+Example 4 (Scroll action):
+```json
+{
+  "Thought": "There might be more content below the visible area. I should scroll down to discover hidden widgets.",
+  "Action_Type": "scroll_down",
+  "Target_Widget": null,
+  "Input_Content": null,
+  "Status": "Exploring hidden content"
+}
+```
+
+IMPORTANT: Output ONLY the JSON block. No additional text, no explanations outside the JSON.
 """
 
 
@@ -110,8 +176,16 @@ class LLMClient:
     封装与 LLM 的交互逻辑，支持 OpenAI 兼容 API 和模拟模式
     """
 
-    # 默认安全动作：当 API 调用失败时返回
-    SAFE_FALLBACK_ACTION = 'Operation: "scroll" Widget: "None"'
+    # 默认安全动作：当 API 调用失败时返回（ReAct JSON 格式）
+    SAFE_FALLBACK_ACTION = '''```json
+{
+  "Thought": "API call failed, using safe fallback action to continue exploration.",
+  "Action_Type": "back",
+  "Target_Widget": null,
+  "Input_Content": null,
+  "Status": "Fallback action due to API error"
+}
+```'''
 
     def __init__(
         self,
@@ -278,16 +352,42 @@ class LLMClient:
 
         if widgets_match:
             widgets_str = widgets_match.group(1)
-            # 提取第一个控件名
-            widgets = [w.strip().strip(',') for w in widgets_str.split(',') if w.strip()]
+            # 提取第一个控件名（去除探索标记）
+            widgets = []
+            for w in widgets_str.split(','):
+                w = w.strip()
+                if w:
+                    # 移除 [ALREADY EXPLORED] 等标记
+                    if '[' in w:
+                        w = w.split('[')[0].strip()
+                    if w:
+                        widgets.append(w)
+
             if widgets:
                 first_widget = widgets[0]
-                mock_response = f'Operation: "click" Widget: "{first_widget}"'
+                # 返回 ReAct JSON 格式
+                mock_response = f'''```json
+{{
+  "Thought": "Mock mode: clicking the first available widget for testing.",
+  "Action_Type": "click",
+  "Target_Widget": "{first_widget}",
+  "Input_Content": null,
+  "Status": "Mock mode testing"
+}}
+```'''
                 safe_print(f"[LLM客户端] 模拟响应: {mock_response}")
                 return mock_response
 
-        # 默认模拟响应
-        mock_response = 'Operation: "click" Widget: "Search"'
+        # 默认模拟响应（ReAct JSON 格式）
+        mock_response = '''```json
+{
+  "Thought": "Mock mode: default action to search for testing.",
+  "Action_Type": "click",
+  "Target_Widget": "Search",
+  "Input_Content": null,
+  "Status": "Mock mode default"
+}
+```'''
         safe_print(f"[LLM客户端] 模拟响应: {mock_response}")
         return mock_response
 

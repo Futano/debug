@@ -2,8 +2,11 @@
 动作执行器模块
 解析 LLM 响应并执行相应的 GUI 操作
 集成崩溃检测机制，实现 GPTDroid 论文的 Bug Oracle 功能
+
+支持 ReAct JSON 格式解析，提高 LLM 决策智商
 """
 
+import json
 import re
 import time
 from datetime import datetime
@@ -26,16 +29,22 @@ BUG_REPORTS_DIR = Path("bug_reports")
 class ParsedAction:
     """
     解析后的动作数据结构
+
+    支持 ReAct JSON 格式，包含推理和动作信息
     """
     def __init__(
         self,
         operation: Optional[str] = None,
         widget: Optional[str] = None,
-        input_text: Optional[str] = None
+        input_text: Optional[str] = None,
+        thought: Optional[str] = None,
+        status: Optional[str] = None
     ):
         self.operation = operation
         self.widget = widget
         self.input_text = input_text
+        self.thought = thought  # ReAct: 推理过程
+        self.status = status    # ReAct: 状态信息
 
     def is_valid(self) -> bool:
         """检查是否为有效的动作"""
@@ -64,6 +73,8 @@ class ParsedAction:
             parts.append(f"widget='{self.widget}'")
         if self.input_text:
             parts.append(f"input='{self.input_text}'")
+        if self.thought:
+            parts.append(f"thought='{self.thought[:50]}...'" if len(self.thought or '') > 50 else f"thought='{self.thought}'")
         return f"ParsedAction({', '.join(parts)})"
 
 
@@ -391,26 +402,133 @@ class ActionExecutor:
 
     def _parse_llm_response(self, llm_response: str) -> ParsedAction:
         """
-        使用极其鲁棒的正则表达式解析 LLM 响应
+        解析 LLM 响应，优先使用 ReAct JSON 格式，回退兼容旧格式
 
-        支持多种格式，能从包含废话的长文本中精准提取：
-        - Operation: "click" Widget: "Search"
-        - Widget: "SearchBox" Input: "test query"
-        - operation: click widget: Search（无引号）
-        - "Sure! Here is the operation... Operation: "click" Widget: "Login""
-        - 多行文本，带各种前缀干扰
-
-        关键特性：
-        1. 优先匹配带双引号的格式（最可靠）
-        2. 回退兼容不带引号的格式
-        3. 使用 re.search 无视换行和前缀干扰
-        4. 自动补全：有 Input 无 Operation 时自动设置 operation='input'
+        解析策略：
+        1. 尝试提取 JSON 代码块（```json ... ```）
+        2. 尝试直接解析 JSON 对象
+        3. 回退到正则表达式解析旧格式
 
         Args:
             llm_response: LLM 响应字符串
 
         Returns:
             ParsedAction 对象，包含解析出的操作、控件和输入文本
+        """
+        action = ParsedAction()
+
+        if not llm_response:
+            return action
+
+        # ========== 优先尝试 JSON 解析（ReAct 格式）==========
+        json_action = self._parse_json_response(llm_response)
+        if json_action and json_action.is_valid():
+            print(f"[JSON解析成功] {json_action}")
+            return json_action
+
+        # ========== 回退到正则表达式解析（旧格式兼容）==========
+        print("[JSON解析失败] 回退到正则表达式解析...")
+        return self._parse_regex_response(llm_response)
+
+    def _parse_json_response(self, llm_response: str) -> Optional[ParsedAction]:
+        """
+        解析 ReAct JSON 格式的 LLM 响应
+
+        支持格式：
+        1. Markdown 代码块: ```json\n{...}\n```
+        2. 纯 JSON 对象: {...}
+
+        JSON 字段映射：
+        - Thought -> action.thought
+        - Action_Type -> action.operation
+        - Target_Widget -> action.widget
+        - Input_Content -> action.input_text
+        - Status -> action.status
+
+        Args:
+            llm_response: LLM 响应字符串
+
+        Returns:
+            ParsedAction 对象，解析失败返回 None
+        """
+        try:
+            json_str = None
+
+            # 策略1：提取 Markdown JSON 代码块
+            json_block_pattern = r'```(?:json)?\s*([\s\S]*?)```'
+            match = re.search(json_block_pattern, llm_response, re.IGNORECASE)
+            if match:
+                json_str = match.group(1).strip()
+                print(f"[JSON提取] 从代码块提取: {json_str[:100]}...")
+
+            # 策略2：直接查找 JSON 对象（如果没有代码块）
+            if not json_str:
+                # 查找第一个 { 和最后一个 }
+                start_idx = llm_response.find('{')
+                end_idx = llm_response.rfind('}')
+                if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                    json_str = llm_response[start_idx:end_idx + 1]
+                    print(f"[JSON提取] 直接提取对象: {json_str[:100]}...")
+
+            if not json_str:
+                return None
+
+            # 解析 JSON
+            data = json.loads(json_str)
+
+            # 构建 ParsedAction
+            action = ParsedAction()
+
+            # 提取字段（支持多种可能的键名）
+            action.thought = data.get('Thought') or data.get('thought') or data.get('reasoning')
+            action.status = data.get('Status') or data.get('status')
+
+            # 提取 Action_Type
+            action_type = data.get('Action_Type') or data.get('action_type') or data.get('ActionType') or data.get('action')
+            if action_type:
+                # 标准化操作类型
+                action.operation = self._normalize_operation(str(action_type).lower().strip())
+
+            # 提取 Target_Widget
+            target_widget = data.get('Target_Widget') or data.get('target_widget') or data.get('TargetWidget') or data.get('widget')
+            if target_widget and str(target_widget).lower() not in ('null', 'none', ''):
+                action.widget = str(target_widget).strip()
+
+            # 提取 Input_Content
+            input_content = data.get('Input_Content') or data.get('input_content') or data.get('InputContent') or data.get('input')
+            if input_content and str(input_content).lower() not in ('null', 'none', ''):
+                action.input_text = str(input_content).strip()
+
+            # 如果有 input_text 但没有 operation，自动设置为 input
+            if action.input_text and not action.operation:
+                action.operation = "input"
+
+            print(f"[JSON解析] Thought: {action.thought[:50] if action.thought else 'N/A'}...")
+            print(f"[JSON解析] Action_Type: {action.operation}, Target_Widget: {action.widget}, Input_Content: {action.input_text}")
+
+            return action
+
+        except json.JSONDecodeError as e:
+            print(f"[JSON解析错误] JSON 格式无效: {e}")
+            return None
+        except Exception as e:
+            print(f"[JSON解析异常] {type(e).__name__}: {e}")
+            return None
+
+    def _parse_regex_response(self, llm_response: str) -> ParsedAction:
+        """
+        使用正则表达式解析旧格式的 LLM 响应（向后兼容）
+
+        支持多种格式，能从包含废话的长文本中精准提取：
+        - Operation: "click" Widget: "Search"
+        - Widget: "SearchBox" Input: "test query"
+        - operation: click widget: Search（无引号）
+
+        Args:
+            llm_response: LLM 响应字符串
+
+        Returns:
+            ParsedAction 对象
         """
         action = ParsedAction()
 
@@ -865,36 +983,73 @@ class ActionExecutor:
 if __name__ == "__main__":
     executor = ActionExecutor()
 
-    # 测试各种格式的响应解析
-    test_responses = [
-        'Operation: "click" Widget: "Search"',
-        'Sure! Based on the current page, I suggest you to:\nOperation: "click" Widget: "Login"',
-        'Widget: "SearchBox" Input: "hello world"',  # 测试推断 input 操作
-        'Widget: "search_src_text" Input: "test query"',  # 用户实际遇到的场景
-        'operation: long press widget: SubmitButton',
-        'Let me help you. You should click on "Settings" button.\nOperation: "click" Widget: "Settings"',
-        'Operation: "scroll" Widget: "None"',
-        'Input: "just text without widget"',  # 测试只有 Input 的情况
-        # 新增测试用例：用户报告的问题场景
-        'Operation: "click" Widget: "about:blank"',  # 包含特殊字符的 widget
-        'Function: execute_test\nOperation: "click" Widget: "Load URL"',  # 多行带前缀干扰
-        'Some random text before...\nOperation: "click" Widget: "Next"\nMore text after...',  # 前后都有干扰文本
-        'Widget: "Email address" Input: "test@example.com"',  # 输入框场景
-        # 新增测试用例：系统级动作（无需 Widget）
-        'Operation: "back"',  # 返回键
-        'Operation: "back" Widget: "None"',  # 返回键带无效 Widget
-        'Operation: "home"',  # Home 键
-        'Operation: "scroll_down"',  # 向下滚动
-        'Operation: "scroll_up"',  # 向上滚动
-        'Operation: "go back"',  # 同义词测试
-        'operation: scroll down',  # 同义词测试（空格）
+    # ========== 测试 ReAct JSON 格式解析 ==========
+    json_test_responses = [
+        # 标准 JSON 格式（带代码块）
+        '''```json
+{
+  "Thought": "The Login button is visible and not yet explored. I should click it to navigate to the login page.",
+  "Action_Type": "click",
+  "Target_Widget": "Login",
+  "Input_Content": null,
+  "Status": "Testing login flow"
+}
+```''',
+        # 纯 JSON 对象（无代码块）
+        '{"Thought": "There is a search input field.", "Action_Type": "input", "Target_Widget": "SearchBox", "Input_Content": "test query", "Status": "Testing search"}',
+        # back 操作
+        '''```json
+{
+  "Thought": "I have explored all widgets on this page.",
+  "Action_Type": "back",
+  "Target_Widget": null,
+  "Input_Content": null,
+  "Status": "Navigating back"
+}
+```''',
+        # scroll_down 操作
+        '''```json
+{
+  "Thought": "There might be more content below.",
+  "Action_Type": "scroll_down",
+  "Target_Widget": null,
+  "Input_Content": null,
+  "Status": "Exploring hidden content"
+}
+```''',
+        # 小写字段名测试
+        '{"thought": "test", "action_type": "click", "target_widget": "Settings", "input_content": null}',
     ]
 
     print("=" * 60)
-    print("正则解析测试")
+    print("ReAct JSON 格式解析测试")
     print("=" * 60)
 
-    for response in test_responses:
+    for response in json_test_responses:
+        print(f"\n输入: {response[:80]}...")
+        action = executor._parse_llm_response(response)
+        print(f"输出: {action}")
+        print(f"有效: {action.is_valid()}")
+        if action.thought:
+            print(f"Thought: {action.thought}")
+
+    # ========== 测试旧格式解析（向后兼容）==========
+    legacy_test_responses = [
+        'Operation: "click" Widget: "Search"',
+        'Sure! Based on the current page, I suggest you to:\nOperation: "click" Widget: "Login"',
+        'Widget: "SearchBox" Input: "hello world"',
+        'Widget: "search_src_text" Input: "test query"',
+        'operation: long press widget: SubmitButton',
+        'Operation: "back"',
+        'Operation: "scroll_down"',
+        'Operation: "go back"',  # 同义词测试
+    ]
+
+    print("\n" + "=" * 60)
+    print("旧格式解析测试（向后兼容）")
+    print("=" * 60)
+
+    for response in legacy_test_responses:
         print(f"\n输入: {response[:60]}...")
         action = executor._parse_llm_response(response)
         print(f"输出: {action}")

@@ -142,8 +142,12 @@ class GUIAnalyzer:
             parent_chain: 从根节点到当前节点的父节点链（用于事件冒泡）
             max_bubble_depth: 向上冒泡的最大深度（默认 3 层：父、爷、祖）
         """
-        # 提取节点属性
-        node_info = self._extract_node_info(node)
+        # 获取父节点和兄弟节点
+        parent_node = parent_chain[-1] if parent_chain else None
+        sibling_nodes = list(parent_node) if parent_node else []
+
+        # 提取节点属性（包含 NearbyWidget 信息）
+        node_info = self._extract_node_info(node, parent_node, sibling_nodes)
 
         # ========== 第一道防线：物理坐标有效性验证 ==========
         if not self._is_valid_bounds(node_info.get("bounds", "")):
@@ -225,7 +229,11 @@ class GUIAnalyzer:
         for child in node:
             self._traverse_node(child, new_chain, max_bubble_depth)
 
-    def _traverse_node_lenient(self, node: ET.Element) -> None:
+    def _traverse_node_lenient(
+        self,
+        node: ET.Element,
+        parent_node: Optional[ET.Element] = None
+    ) -> None:
         """
         降级模式遍历 XML 节点树（放宽标准）
 
@@ -238,15 +246,19 @@ class GUIAnalyzer:
 
         Args:
             node: 当前 XML 元素节点
+            parent_node: 父节点（用于 NearbyWidget）
         """
-        # 提取节点属性
-        node_info = self._extract_node_info(node)
+        # 获取兄弟节点
+        sibling_nodes = list(parent_node) if parent_node else []
+
+        # 提取节点属性（包含 NearbyWidget 信息）
+        node_info = self._extract_node_info(node, parent_node, sibling_nodes)
 
         # 物理坐标有效性验证（降级模式仍需验证）
         if not self._is_valid_bounds(node_info.get("bounds", "")):
             # 仍然遍历子节点
             for child in node:
-                self._traverse_node_lenient(child)
+                self._traverse_node_lenient(child, node)
             return
 
         # 布局容器判断
@@ -288,14 +300,21 @@ class GUIAnalyzer:
 
         # 递归遍历子节点
         for child in node:
-            self._traverse_node_lenient(child)
+            self._traverse_node_lenient(child, node)
 
-    def _extract_node_info(self, node: ET.Element) -> Dict:
+    def _extract_node_info(
+        self,
+        node: ET.Element,
+        parent_node: Optional[ET.Element] = None,
+        sibling_nodes: Optional[List[ET.Element]] = None
+    ) -> Dict:
         """
         提取节点的关键属性信息
 
         Args:
             node: XML 元素节点
+            parent_node: 父节点（用于提取 NearbyWidget）
+            sibling_nodes: 兄弟节点列表（用于提取 NearbyWidget）
 
         Returns:
             包含节点信息的字典
@@ -322,6 +341,9 @@ class GUIAnalyzer:
         # 如果 text 为空，则使用 content-desc 作为显示文本
         display_text = text if text else content_desc
 
+        # 提取 NearbyWidget 信息
+        nearby_widget = self._extract_nearby_widget(node, parent_node, sibling_nodes)
+
         return {
             "class": class_name,
             "text": display_text,  # text 为空时取 content-desc
@@ -339,7 +361,120 @@ class GUIAnalyzer:
             "focusable": focusable,
             "editable": editable,
             "enabled": enabled,
+            # NearbyWidget: 父节点和兄弟节点信息
+            "parent": nearby_widget["parent"],
+            "siblings": nearby_widget["siblings"],
         }
+
+    def _extract_nearby_widget(
+        self,
+        node: ET.Element,
+        parent_node: Optional[ET.Element],
+        sibling_nodes: Optional[List[ET.Element]]
+    ) -> Dict:
+        """
+        提取周围控件信息（父节点 + 兄弟节点）
+
+        Args:
+            node: 当前节点
+            parent_node: 父节点
+            sibling_nodes: 兄弟节点列表
+
+        Returns:
+            {"parent": {...}, "siblings": [...]}
+        """
+        result = {
+            "parent": None,
+            "siblings": []
+        }
+
+        # 提取父节点信息
+        if parent_node is not None:
+            parent_class = parent_node.get("class", "")
+            parent_text = parent_node.get("text", "") or parent_node.get("content-desc", "")
+            parent_id = parent_node.get("resource-id", "")
+
+            result["parent"] = {
+                "class": self._get_simple_class_name(parent_class),
+                "text": parent_text,
+                "resource_id": parent_id
+            }
+
+        # 提取兄弟节点信息
+        if sibling_nodes:
+            # 获取当前节点在兄弟列表中的索引
+            current_index = -1
+            for i, sibling in enumerate(sibling_nodes):
+                if sibling is node:
+                    current_index = i
+                    break
+
+            if current_index >= 0:
+                # 收集前后各最多3个兄弟节点
+                siblings_info = []
+
+                # 前面的兄弟节点（最多3个）
+                prev_siblings = sibling_nodes[max(0, current_index - 3):current_index]
+                for sib in prev_siblings:
+                    sib_info = self._get_sibling_info(sib, "before")
+                    if sib_info:
+                        siblings_info.append(sib_info)
+
+                # 后面的兄弟节点（最多3个）
+                next_siblings = sibling_nodes[current_index + 1:current_index + 4]
+                for sib in next_siblings:
+                    sib_info = self._get_sibling_info(sib, "after")
+                    if sib_info:
+                        siblings_info.append(sib_info)
+
+                result["siblings"] = siblings_info
+
+        return result
+
+    def _get_sibling_info(self, sibling: ET.Element, position: str) -> Optional[Dict]:
+        """
+        获取兄弟节点的基本信息
+
+        Args:
+            sibling: 兄弟节点
+            position: 相对位置 ("before" 或 "after")
+
+        Returns:
+            兄弟节点信息字典，无效节点返回 None
+        """
+        sib_class = sibling.get("class", "")
+        sib_text = sibling.get("text", "") or sibling.get("content-desc", "")
+
+        # 过滤无意义的布局容器
+        simple_class = self._get_simple_class_name(sib_class)
+        if simple_class in self.GHOST_WIDGET_BLACKLIST:
+            return None
+
+        # 至少要有类名或文本才有意义
+        if not simple_class and not sib_text:
+            return None
+
+        return {
+            "class": simple_class,
+            "text": sib_text,
+            "position": position
+        }
+
+    def _get_simple_class_name(self, full_class_name: str) -> str:
+        """
+        获取简单类名（去掉包名前缀）
+
+        Args:
+            full_class_name: 完整类名，如 "android.widget.Button"
+
+        Returns:
+            简单类名，如 "Button"
+        """
+        if not full_class_name:
+            return ""
+        if '.' in full_class_name:
+            return full_class_name.split('.')[-1]
+        return full_class_name
 
     def _parse_bounds(self, bounds: str) -> Tuple[Optional[int], Optional[int], str]:
         """
@@ -632,7 +767,7 @@ if __name__ == "__main__":
     test_file = sys.argv[1] if len(sys.argv) > 1 else "temp_data/current_ui.xml"
 
     print("=" * 60)
-    print("XML 解析测试 - 有效动作空间剪枝 + 优雅降级")
+    print("XML 解析测试 - 有效动作空间剪枝 + NearbyWidget")
     print("=" * 60)
 
     analyzer = GUIAnalyzer()
@@ -644,9 +779,9 @@ if __name__ == "__main__":
     for key, value in summary.items():
         print(f"  {key}: {value}")
 
-    # 打印前 10 个有效控件
-    print(f"\n--- 前 10 个有效控件 ---")
-    for i, node in enumerate(nodes[:10]):
+    # 打印前 5 个有效控件（显示完整信息）
+    print(f"\n--- 前 5 个有效控件 ---")
+    for i, node in enumerate(nodes[:5]):
         print(f"\n[控件 {i + 1}]")
         print(f"  类别: {node['class']}")
         print(f"  文本: {node['text']}")
@@ -655,6 +790,18 @@ if __name__ == "__main__":
         print(f"  坐标: ({node['center_x']}, {node['center_y']})")
         print(f"  交互属性: clickable={node['clickable']}, scrollable={node['scrollable']}")
         print(f"  验证原因: {node.get('_validation_reason', 'N/A')}")
+
+        # NearbyWidget 信息
+        parent = node.get("parent")
+        if parent:
+            print(f"  父节点: {parent.get('class', 'N/A')} | text: '{parent.get('text', '')}'")
+
+        siblings = node.get("siblings", [])
+        if siblings:
+            print(f"  兄弟节点 ({len(siblings)} 个):")
+            for sib in siblings:
+                print(f"    - [{sib.get('position', '?')}] {sib.get('class', 'N/A')}: '{sib.get('text', '')}'")
+
         if node.get("bubble_parent"):
             print(f"  冒泡父级: {node['bubble_parent']}")
         if node.get("_fallback_mode"):
