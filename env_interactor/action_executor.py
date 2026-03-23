@@ -31,6 +31,15 @@ class ParsedAction:
     解析后的动作数据结构
 
     支持 ReAct JSON 格式，包含推理和动作信息
+    支持功能查询响应解析（FunctionName + Status）
+    支持多输入操作（多个 Widget/Input 对）
+    支持输入后操作（OperationWidget）
+
+    JSON 格式示例:
+    - 非输入操作:
+      {"Thought": "...", "Function": "...", "Status": "Yes/No", "Operation": "click", "Widget": "Button"}
+    - 输入操作:
+      {"Thought": "...", "Function": "...", "Status": "Yes/No", "Widget": "InputField", "Input": "text", "Operation": "click", "OperationWidget": "Submit"}
     """
     def __init__(
         self,
@@ -38,13 +47,21 @@ class ParsedAction:
         widget: Optional[str] = None,
         input_text: Optional[str] = None,
         thought: Optional[str] = None,
-        status: Optional[str] = None
+        status: Optional[str] = None,
+        function_name: Optional[str] = None,
+        function_status: Optional[str] = None,
+        input_sequence: Optional[List[Tuple[str, str]]] = None,
+        operation_widget: Optional[str] = None
     ):
         self.operation = operation
         self.widget = widget
         self.input_text = input_text
         self.thought = thought  # ReAct: 推理过程
         self.status = status    # ReAct: 状态信息
+        self.function_name = function_name  # Function Query: 功能名称
+        self.function_status = function_status  # Function Query: 功能状态 (tested/testing)
+        self.input_sequence = input_sequence  # 多输入序列: [(widget, input_text), ...]
+        self.operation_widget = operation_widget  # 输入后的操作目标控件（如 Submit 按钮）
 
     def is_valid(self) -> bool:
         """检查是否为有效的动作"""
@@ -72,10 +89,30 @@ class ParsedAction:
         if self.widget:
             parts.append(f"widget='{self.widget}'")
         if self.input_text:
-            parts.append(f"input='{self.input_text}'")
+            parts.append(f"input='{self.input_text[:30]}...'" if len(self.input_text) > 30 else f"input='{self.input_text}'")
+        if self.operation_widget:
+            parts.append(f"op_widget='{self.operation_widget}'")
+        if self.input_sequence:
+            parts.append(f"inputs={len(self.input_sequence)}")
         if self.thought:
             parts.append(f"thought='{self.thought[:50]}...'" if len(self.thought or '') > 50 else f"thought='{self.thought}'")
+        if self.function_name:
+            parts.append(f"function='{self.function_name}'")
+            if self.function_status:
+                parts.append(f"status='{self.function_status}'")
         return f"ParsedAction({', '.join(parts)})"
+
+    def has_function_info(self) -> bool:
+        """Check if parsed action contains function information"""
+        return self.function_name is not None and self.function_status is not None
+
+    def has_multiple_inputs(self) -> bool:
+        """Check if parsed action has multiple input operations"""
+        return self.input_sequence is not None and len(self.input_sequence) > 0
+
+    def has_input_with_operation(self) -> bool:
+        """Check if this is an input operation followed by another operation (e.g., click submit)"""
+        return self.input_text is not None and self.operation_widget is not None
 
 
 class ActionExecutor:
@@ -213,6 +250,29 @@ class ActionExecutor:
             return success, action
 
         # ========== 处理控件级操作（需要匹配控件）==========
+
+        # 处理多输入操作（多个 Widget/Input 对）
+        if action.has_multiple_inputs():
+            success = self._execute_multiple_inputs_action(action, parsed_widgets, adb_controller)
+
+            # 执行后检测崩溃
+            self._check_crash_after_action(
+                adb_controller, memory_manager, activity_name, action
+            )
+
+            return success, action
+
+        # 处理输入+操作组合（Widget + Input + Operation + OperationWidget）
+        # 例如：输入文本到输入框，然后点击 Submit 按钮
+        if action.has_input_with_operation():
+            success = self._execute_input_then_operation(action, parsed_widgets, adb_controller)
+
+            # 执行后检测崩溃
+            self._check_crash_after_action(
+                adb_controller, memory_manager, activity_name, action
+            )
+
+            return success, action
 
         # 处理输入操作（operation == 'input' 或有 input_text）
         if action.operation == "input" or (action.input_text and action.widget):
@@ -479,32 +539,88 @@ class ActionExecutor:
             # 构建 ParsedAction
             action = ParsedAction()
 
-            # 提取字段（支持多种可能的键名）
+            # 提取 Thought
             action.thought = data.get('Thought') or data.get('thought') or data.get('reasoning')
-            action.status = data.get('Status') or data.get('status')
 
-            # 提取 Action_Type
-            action_type = data.get('Action_Type') or data.get('action_type') or data.get('ActionType') or data.get('action')
-            if action_type:
-                # 标准化操作类型
-                action.operation = self._normalize_operation(str(action_type).lower().strip())
+            # ========== 提取 Function 信息 ==========
+            function_name = data.get('Function') or data.get('function')
+            if function_name and str(function_name).lower() not in ('null', 'none', ''):
+                action.function_name = str(function_name).strip()
 
-            # 提取 Target_Widget
-            target_widget = data.get('Target_Widget') or data.get('target_widget') or data.get('TargetWidget') or data.get('widget')
-            if target_widget and str(target_widget).lower() not in ('null', 'none', ''):
-                action.widget = str(target_widget).strip()
+                # Status: Yes = new function (testing), No = continue existing (tested)
+                status_val = data.get('Status') or data.get('status')
+                if status_val:
+                    status_str = str(status_val).strip().lower()
+                    if status_str == 'yes':
+                        action.function_status = 'testing'
+                    elif status_str == 'no':
+                        action.function_status = 'tested'
+                    else:
+                        action.function_status = status_str
+                else:
+                    action.function_status = 'testing'
 
-            # 提取 Input_Content
-            input_content = data.get('Input_Content') or data.get('input_content') or data.get('InputContent') or data.get('input')
-            if input_content and str(input_content).lower() not in ('null', 'none', ''):
-                action.input_text = str(input_content).strip()
+            # ========== 提取 Operation ==========
+            # 新格式: Operation 字段
+            # 旧格式: Action_Type 字段
+            operation_val = data.get('Operation') or data.get('operation') or \
+                           data.get('Action_Type') or data.get('action_type') or data.get('ActionType')
+            if operation_val:
+                action.operation = self._normalize_operation(str(operation_val).lower().strip())
 
-            # 如果有 input_text 但没有 operation，自动设置为 input
+            # ========== 提取 Widget ==========
+            # 新格式: Widget 字段（输入框或操作目标）
+            # 旧格式: Target_Widget 字段
+            widget_val = data.get('Widget') or data.get('widget') or \
+                        data.get('Target_Widget') or data.get('target_widget') or data.get('TargetWidget')
+            if widget_val and str(widget_val).lower() not in ('null', 'none', ''):
+                action.widget = str(widget_val).strip()
+
+            # ========== 提取 Input ==========
+            # 新格式: Inputs 数组 (多输入支持)
+            # 旧格式: Input 字段 (单输入)
+            # 更旧格式: Input_Content 字段
+            inputs_array = data.get('Inputs') or data.get('inputs')
+            if inputs_array and isinstance(inputs_array, list):
+                # 处理多输入数组格式
+                input_sequence = []
+                for item in inputs_array:
+                    if isinstance(item, dict):
+                        widget_name = item.get('Widget') or item.get('widget')
+                        input_text = item.get('Input') or item.get('input')
+                        if widget_name and input_text:
+                            input_sequence.append((str(widget_name).strip(), str(input_text).strip()))
+                if input_sequence:
+                    action.input_sequence = input_sequence
+                    # 设置第一个输入作为主 widget 和 input_text（向后兼容）
+                    action.widget = input_sequence[0][0]
+                    action.input_text = input_sequence[0][1]
+                    print(f"[JSON解析] 多输入序列: {input_sequence}")
+            else:
+                # 单输入格式
+                input_val = data.get('Input') or data.get('input') or \
+                           data.get('Input_Content') or data.get('input_content') or data.get('InputContent')
+                if input_val and str(input_val).lower() not in ('null', 'none', ''):
+                    action.input_text = str(input_val).strip()
+
+            # ========== 提取 OperationWidget ==========
+            # 新格式专用：输入操作后的目标控件（如 Submit 按钮）
+            operation_widget = data.get('OperationWidget') or data.get('operation_widget')
+            if operation_widget and str(operation_widget).lower() not in ('null', 'none', ''):
+                action.operation_widget = str(operation_widget).strip()
+
+            # ========== 后处理 ==========
+            # 如果有 Input 但没有 Operation，默认为 input 操作
             if action.input_text and not action.operation:
                 action.operation = "input"
 
+            # 打印解析结果
             print(f"[JSON解析] Thought: {action.thought[:50] if action.thought else 'N/A'}...")
-            print(f"[JSON解析] Action_Type: {action.operation}, Target_Widget: {action.widget}, Input_Content: {action.input_text}")
+            print(f"[JSON解析] Operation: {action.operation}, Widget: {action.widget}, Input: {action.input_text}")
+            if action.operation_widget:
+                print(f"[JSON解析] OperationWidget: {action.operation_widget}")
+            if action.function_name:
+                print(f"[JSON解析] Function: {action.function_name} ({action.function_status})")
 
             return action
 
@@ -520,9 +636,10 @@ class ActionExecutor:
         使用正则表达式解析旧格式的 LLM 响应（向后兼容）
 
         支持多种格式，能从包含废话的长文本中精准提取：
+        - Function: "Add income". Status: Yes. Operation: "Click". Widget: "ADD INCOME".
+        - Function: "Add income". Status: No. Widget: "Price". Input: "3500". Operation: "Click". Widget: "Submit".
         - Operation: "click" Widget: "Search"
         - Widget: "SearchBox" Input: "test query"
-        - operation: click widget: Search（无引号）
 
         Args:
             llm_response: LLM 响应字符串
@@ -536,6 +653,23 @@ class ActionExecutor:
             return action
 
         try:
+            # ========== 提取 Function ==========
+            # 格式: Function: "Add income". 或 Function: "Add income"
+            function_match = re.search(r'[Ff]unction:\s*"([^"]+)"', llm_response)
+            if function_match:
+                action.function_name = function_match.group(1).strip()
+                print(f"[解析] Function: {action.function_name}")
+
+            # ========== 提取 Status ==========
+            # 格式: Status: Yes. 或 Status: No.
+            # Yes = new function (testing), No = continue existing (tested)
+            status_match = re.search(r'[Ss]tatus:\s*(Yes|No)', llm_response, re.IGNORECASE)
+            if status_match:
+                status_value = status_match.group(1).strip().lower()
+                # Yes = new function being tested, No = continuing existing function
+                action.function_status = "testing" if status_value == "yes" else "tested"
+                print(f"[解析] Function Status: {action.function_status}")
+
             # ========== 提取 Operation ==========
             # 优先匹配带双引号的格式，回退兼容不带引号的格式
             # 支持格式：
@@ -546,7 +680,7 @@ class ActionExecutor:
                 # 优先：带双引号的格式 Operation: "value"
                 r'[Oo]peration:\s*"([^"]+)"',
                 # 回退：不带引号的格式 Operation: value（取到行尾或下一个关键字）
-                r'[Oo]peration:\s*([a-zA-Z]+(?:\s+[a-zA-Z]+)?)(?=\s*(?:[Ww]idget|[Ii]nput|$|\n))',
+                r'[Oo]peration:\s*([a-zA-Z]+(?:\s+[a-zA-Z]+)?)(?=\s*(?:[Ww]idget|[Ii]nput|$|\n|\.))',
             ]
 
             for pattern in operation_patterns:
@@ -556,44 +690,63 @@ class ActionExecutor:
                     break
 
             # ========== 提取 Widget ==========
-            # 优先匹配带双引号的格式，回退兼容不带引号的格式
-            # 支持格式：
-            # - Widget: "Search"
-            # - Widget: "about:blank"（包含特殊字符）
-            # - widget: Search（无引号）
-            widget_patterns = [
-                # 优先：带双引号的格式 Widget: "value"
-                r'[Ww]idget:\s*"([^"]+)"',
-                # 回退：不带引号的格式 Widget: value（取到行尾或下一个关键字）
-                r'[Ww]idget:\s*"?([^"\n]+?)"?(?=\s*(?:[Oo]peration|[Ii]nput|$|\n))',
-            ]
+            # 支持多个 Widget/Input 对（输入场景）
+            # 格式: Widget: "Price". Input: "3500". Widget: "Title". Input: "salary".
+            # 取最后一个 Widget 作为目标控件，或者 Operation 后面的 Widget
+            widget_matches = list(re.finditer(r'[Ww]idget:\s*"([^"]+)"', llm_response))
+            if widget_matches:
+                # 如果有 Operation，找 Operation 后面的 Widget
+                if action.operation:
+                    op_match = re.search(r'[Oo]peration:', llm_response, re.IGNORECASE)
+                    if op_match:
+                        op_pos = op_match.end()
+                        for wm in widget_matches:
+                            if wm.start() > op_pos:
+                                action.widget = wm.group(1).strip()
+                                break
+                        # 如果没找到，取最后一个 Widget
+                        if not action.widget:
+                            action.widget = widget_matches[-1].group(1).strip()
+                    else:
+                        action.widget = widget_matches[-1].group(1).strip()
+                else:
+                    action.widget = widget_matches[-1].group(1).strip()
 
-            for pattern in widget_patterns:
-                match = re.search(pattern, llm_response, re.DOTALL | re.IGNORECASE)
-                if match:
-                    widget_value = match.group(1).strip()
-                    # 过滤掉一些无效值
-                    if widget_value.lower() not in ('none', 'null', '', 'widget'):
-                        action.widget = widget_value
-                    break
+                # 过滤掉一些无效值
+                if action.widget and action.widget.lower() in ('none', 'null', '', 'widget'):
+                    action.widget = None
 
             # ========== 提取 Input 文本 ==========
-            # 优先匹配带双引号的格式，回退兼容不带引号的格式
-            # 支持格式：
-            # - Input: "text to type"
-            # - input: text（无引号）
-            input_patterns = [
-                # 优先：带双引号的格式 Input: "value"
-                r'[Ii]nput:\s*"([^"]+)"',
-                # 回退：不带引号的格式 Input: value（取到行尾）
-                r'[Ii]nput:\s*"?([^"\n]+?)"?(?=\s*(?:[Oo]peration|[Ww]idget|$|\n))',
-            ]
+            # 支持多个 Input，收集所有输入文本
+            # 格式: Widget: "Price". Input: "3500". Widget: "Title". Input: "salary".
+            input_matches = list(re.finditer(r'[Ii]nput:\s*"([^"]+)"', llm_response))
+            widget_matches_for_input = list(re.finditer(r'[Ww]idget:\s*"([^"]+)"', llm_response))
 
-            for pattern in input_patterns:
-                match = re.search(pattern, llm_response, re.DOTALL | re.IGNORECASE)
-                if match:
-                    action.input_text = match.group(1).strip()
-                    break
+            if input_matches:
+                # 收集所有输入，用 || 分隔
+                inputs = [m.group(1).strip() for m in input_matches]
+                action.input_text = " || ".join(inputs)
+                print(f"[解析] Input texts: {action.input_text}")
+
+                # 构建 input_sequence（Widget/Input 配对）
+                # 找到每个 Input 前面最近的 Widget
+                input_sequence = []
+                for input_match in input_matches:
+                    input_pos = input_match.start()
+                    input_val = input_match.group(1).strip()
+                    # 找最近的 Widget
+                    closest_widget = None
+                    for wm in widget_matches_for_input:
+                        if wm.start() < input_pos:
+                            closest_widget = wm.group(1).strip()
+                        else:
+                            break
+                    if closest_widget:
+                        input_sequence.append((closest_widget, input_val))
+
+                if input_sequence:
+                    action.input_sequence = input_sequence
+                    print(f"[解析] Input sequence: {input_sequence}")
 
             # ========== 后处理和验证 ==========
 
@@ -658,6 +811,278 @@ class ActionExecutor:
 
         return operation_map.get(operation, operation)
 
+    def parse_function_query_response(self, llm_response: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Parse function query response from LLM
+
+        Extracts FunctionName + Status from the LLM response to the function query.
+
+        Expected formats:
+        - JSON: {"Function": "Login", "Status": "testing"}
+        - Text: Login + testing
+        - Text with parentheses: (Login + testing)
+        - Text: We are testing the Login function. (Login + testing)
+
+        Args:
+            llm_response: LLM response string
+
+        Returns:
+            Tuple of (function_name, function_status), or (None, None) if parsing fails
+        """
+        if not llm_response:
+            return None, None
+
+        print("\n[Function Query Parser] Parsing LLM response...")
+
+        # Strategy 1: Try JSON parsing
+        json_result = self._parse_function_from_json(llm_response)
+        if json_result[0]:
+            print(f"[Function Query Parser] JSON parsed: {json_result[0]} + {json_result[1]}")
+            return json_result
+
+        # Strategy 2: Try pattern matching (FunctionName + Status)
+        pattern_result = self._parse_function_from_pattern(llm_response)
+        if pattern_result[0]:
+            print(f"[Function Query Parser] Pattern matched: {pattern_result[0]} + {pattern_result[1]}")
+            return pattern_result
+
+        print("[Function Query Parser] Failed to parse function info")
+        return None, None
+
+    def _parse_function_from_json(self, llm_response: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Try to parse function info from JSON format
+
+        Args:
+            llm_response: LLM response string
+
+        Returns:
+            Tuple of (function_name, function_status)
+        """
+        try:
+            # Try to extract JSON from code block
+            json_block_pattern = r'```(?:json)?\s*([\s\S]*?)```'
+            match = re.search(json_block_pattern, llm_response, re.IGNORECASE)
+            if match:
+                json_str = match.group(1).strip()
+                data = json.loads(json_str)
+
+                function_name = data.get('Function') or data.get('function') or data.get('FunctionName') or data.get('function_name')
+                function_status = data.get('Status') or data.get('status') or data.get('FunctionStatus') or data.get('function_status')
+
+                if function_name:
+                    return str(function_name).strip(), str(function_status or "testing").strip()
+
+            # Try to find JSON object directly
+            start_idx = llm_response.find('{')
+            end_idx = llm_response.rfind('}')
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_str = llm_response[start_idx:end_idx + 1]
+                data = json.loads(json_str)
+
+                function_name = data.get('Function') or data.get('function') or data.get('FunctionName') or data.get('function_name')
+                function_status = data.get('Status') or data.get('status') or data.get('FunctionStatus') or data.get('function_status')
+
+                if function_name:
+                    return str(function_name).strip(), str(function_status or "testing").strip()
+
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"[Function JSON Parse] Failed: {e}")
+
+        return None, None
+
+    def _parse_function_from_pattern(self, llm_response: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Try to parse function info from text pattern
+
+        Patterns:
+        - FunctionName + Status (e.g., "Login + testing")
+        - (FunctionName + Status)
+
+        Args:
+            llm_response: LLM response string
+
+        Returns:
+            Tuple of (function_name, function_status)
+        """
+        # Pattern 0 (NEW): Function: "xxx". Status: Yes/No.
+        pattern0 = r'[Ff]unction:\s*"([^"]+)"[^.]*\.\s*[Ss]tatus:\s*(Yes|No)'
+        match = re.search(pattern0, llm_response, re.IGNORECASE)
+        if match:
+            func_name = match.group(1).strip()
+            status_val = match.group(2).strip().lower()
+            # Yes = new function (testing), No = continue existing (tested)
+            func_status = 'testing' if status_val == 'yes' else 'tested'
+            return func_name, func_status
+
+        # Pattern 1: (FunctionName + Status) with parentheses
+        pattern1 = r'\(([A-Za-z_][A-Za-z0-9_\s]*)\s*\+\s*(tested|testing|new)\)'
+        match = re.search(pattern1, llm_response, re.IGNORECASE)
+        if match:
+            return match.group(1).strip(), match.group(2).lower()
+
+        # Pattern 2: FunctionName + Status without parentheses
+        pattern2 = r'([A-Za-z_][A-Za-z0-9_\s]*)\s*\+\s*(tested|testing|new)'
+        match = re.search(pattern2, llm_response, re.IGNORECASE)
+        if match:
+            return match.group(1).strip(), match.group(2).lower()
+
+        # Pattern 3: "testing FunctionName" or "tested FunctionName"
+        pattern3 = r'(testing|tested)\s+(?:the\s+)?([A-Za-z_][A-Za-z0-9_\s]*?)(?:\s+function|\s*$|\.)'
+        match = re.search(pattern3, llm_response, re.IGNORECASE)
+        if match:
+            status = match.group(1).lower()
+            func_name = match.group(2).strip()
+            return func_name, status
+
+        # Pattern 4: "FunctionName function" with status elsewhere
+        pattern4 = r'([A-Za-z_][A-Za-z0-9_\s]*?)\s+function'
+        match = re.search(pattern4, llm_response, re.IGNORECASE)
+        if match:
+            function_name = match.group(1).strip()
+            # Check for status in the response
+            if 'tested' in llm_response.lower():
+                return function_name, 'tested'
+            elif 'testing' in llm_response.lower():
+                return function_name, 'testing'
+            elif 'new' in llm_response.lower():
+                return function_name, 'testing'
+            return function_name, 'testing'
+
+        return None, None
+
+    def _execute_multiple_inputs_action(
+        self,
+        action: ParsedAction,
+        parsed_widgets: List[Dict],
+        adb_controller: ADBController
+    ) -> bool:
+        """
+        执行多输入操作：依次点击每个输入框并输入文本
+
+        Args:
+            action: 解析后的动作，包含 input_sequence
+            parsed_widgets: 控件列表
+            adb_controller: ADB 控制器
+
+        Returns:
+            是否执行成功
+        """
+        print(f"[多输入操作] 共 {len(action.input_sequence)} 个输入")
+
+        for i, (widget_name, input_text) in enumerate(action.input_sequence, 1):
+            print(f"\n[输入 {i}/{len(action.input_sequence)}] 控件: {widget_name}, 文本: {input_text}")
+
+            # 查找输入框控件
+            target_widget = self._find_target_widget(widget_name, parsed_widgets)
+            if not target_widget:
+                print(f"[执行失败] 未找到输入框: {widget_name}")
+                return False
+
+            # 计算坐标
+            center_x, center_y = self._calculate_center(target_widget)
+            if center_x is None or center_y is None:
+                print("[执行失败] 无法计算控件坐标")
+                return False
+
+            # 点击输入框获取焦点
+            print(f"[点击] 输入框 {widget_name} ({center_x}, {center_y})")
+            if not adb_controller.click(center_x, center_y):
+                print(f"[执行失败] 无法点击输入框: {widget_name}")
+                return False
+
+            # 等待焦点
+            time.sleep(0.5)
+
+            # 使用 UIAutomator2 清除旧文本并输入新文本
+            print(f"[清除+输入] 使用 UIAutomator2 处理输入框 {widget_name}")
+            if not adb_controller.clear_and_input_text(target_widget, input_text):
+                print(f"[执行失败] 文本输入失败: {input_text}")
+                return False
+
+            # 短暂等待
+            time.sleep(0.3)
+
+        print(f"\n[多输入成功] 已完成 {len(action.input_sequence)} 个输入")
+        return True
+
+    def _execute_input_then_operation(
+        self,
+        action: ParsedAction,
+        parsed_widgets: List[Dict],
+        adb_controller: ADBController
+    ) -> bool:
+        """
+        执行输入+操作组合：先输入文本，然后执行操作（如点击 Submit）
+
+        JSON 格式示例:
+        {"Widget": "InputField", "Input": "text", "Operation": "click", "OperationWidget": "Submit"}
+
+        Args:
+            action: 解析后的动作，包含 widget, input_text, operation, operation_widget
+            parsed_widgets: 控件列表
+            adb_controller: ADB 控制器
+
+        Returns:
+            是否执行成功
+        """
+        print(f"[输入+操作] 输入框: {action.widget}, 文本: {action.input_text}")
+        print(f"[输入+操作] 后续操作: {action.operation} -> {action.operation_widget}")
+
+        # 步骤1：输入文本
+        # 查找输入框控件
+        input_widget = self._find_target_widget(action.widget, parsed_widgets)
+        if not input_widget:
+            print(f"[执行失败] 未找到输入框: {action.widget}")
+            return False
+
+        # 计算输入框坐标
+        input_x, input_y = self._calculate_center(input_widget)
+        if input_x is None or input_y is None:
+            print("[执行失败] 无法计算输入框坐标")
+            return False
+
+        # 点击输入框获取焦点
+        print(f"[步骤1] 点击输入框 ({input_x}, {input_y})")
+        if not adb_controller.click(input_x, input_y):
+            print("[执行失败] 无法点击输入框")
+            return False
+
+        # 等待键盘弹出
+        time.sleep(0.5)
+
+        # 步骤2：使用 UIAutomator2 清除旧文本并输入新文本
+        print(f"[步骤2] 使用 UIAutomator2 清除旧文本并输入: {action.input_text}")
+        if not adb_controller.clear_and_input_text(input_widget, action.input_text):
+            print("[执行失败] 文本输入失败")
+            return False
+
+        # 短暂等待
+        time.sleep(0.3)
+
+        # 步骤3：执行后续操作
+        print(f"[步骤3] 执行操作: {action.operation} -> {action.operation_widget}")
+
+        # 查找操作目标控件
+        target_widget = self._find_target_widget(action.operation_widget, parsed_widgets)
+        if not target_widget:
+            print(f"[执行失败] 未找到操作目标控件: {action.operation_widget}")
+            return False
+
+        # 计算目标坐标
+        target_x, target_y = self._calculate_center(target_widget)
+        if target_x is None or target_y is None:
+            print("[执行失败] 无法计算目标控件坐标")
+            return False
+
+        # 执行操作
+        success = self._perform_operation(action.operation, target_x, target_y, adb_controller)
+
+        if success:
+            print(f"[输入+操作成功] 已输入文本并执行 {action.operation}")
+
+        return success
+
     def _execute_input_action(
         self,
         action: ParsedAction,
@@ -695,13 +1120,13 @@ class ActionExecutor:
             print("[执行失败] 无法点击输入框")
             return False
 
-        # 步骤2：等待 1 秒让键盘弹出
-        print("[步骤2] 等待 1 秒让输入框获得焦点并弹出键盘...")
-        time.sleep(1)
+        # 步骤2：等待 0.5 秒让输入框获得焦点
+        print("[步骤2] 等待输入框获得焦点...")
+        time.sleep(0.5)
 
-        # 步骤3：使用 ADB input_text 方法输入文本
-        print(f"[步骤3] 输入文本: {action.input_text}")
-        if not adb_controller.input_text(action.input_text):
+        # 步骤3：使用 UIAutomator2 清除旧文本并输入新文本
+        print("[步骤3] 使用 UIAutomator2 清除旧文本并输入新文本...")
+        if not adb_controller.clear_and_input_text(target_widget, action.input_text):
             print("[执行失败] 文本输入失败")
             return False
 

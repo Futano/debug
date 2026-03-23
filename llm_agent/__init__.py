@@ -6,8 +6,8 @@
 from .prompt_builder import PromptGenerator
 from .prompt_templates import (
     GUIContextTemplate,
-    TestHistoryTemplate,
-    OperationQuestionTemplate,
+    FunctionMemoryTemplate,
+    TestHistoryTemplate,  # Backward compatibility alias
     build_initial_prompt,
     build_test_prompt,
     build_feedback_prompt
@@ -18,8 +18,8 @@ from .memory_manager import TestingSequenceMemorizer
 __all__ = [
     "PromptGenerator",
     "GUIContextTemplate",
+    "FunctionMemoryTemplate",
     "TestHistoryTemplate",
-    "OperationQuestionTemplate",
     "build_initial_prompt",
     "build_test_prompt",
     "build_feedback_prompt",

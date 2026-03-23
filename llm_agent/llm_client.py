@@ -6,7 +6,14 @@
 
 import os
 import sys
+import time
 from typing import Optional, Tuple
+
+# 导入 Token 监控器
+try:
+    from .token_monitor import TokenMonitor, get_token_monitor
+except ImportError:
+    from token_monitor import TokenMonitor, get_token_monitor
 
 # ============================================================
 # 解决 Windows 编码问题（必须在导入 openai 之前执行）
@@ -79,95 +86,6 @@ def clean_env_var(value: Optional[str]) -> str:
     # 去除可能存在的不可见字符（如零宽字符、BOM 等）
     cleaned = ''.join(char for char in cleaned if char.isprintable())
     return cleaned
-
-
-# 系统提示词：定义 LLM 作为 Android GUI 测试专家的角色和行为规范
-# 采用 ReAct (Reasoning and Acting) 架构，要求严格 JSON 输出
-SYSTEM_PROMPT = """You are an expert Android GUI testing agent. Your goal is to achieve maximum Activity coverage and uncover bugs.
-
-You MUST follow the ReAct (Reasoning and Acting) paradigm:
-1. **THINK** first - Analyze the current screen state and testing history
-2. **ACT** second - Choose the most appropriate action
-
-CRITICAL RULES:
-1. NO HALLUCINATION: You MUST ONLY output a Target_Widget that EXACTLY matches one of the widgets listed in the "The widgets which can be operated are" section. NEVER invent, guess, or reuse widget names from past screens if they are not currently visible.
-2. NO LOOPING: Check the testing history. If your previous action failed (e.g., widget not found) or if you are stuck on the same page, you MUST try a completely different widget from the available list.
-3. AVOID NO_EFFECT WIDGETS: If a previous action is marked as [NO_EFFECT] or [无效操作], it means the click failed or the button is unclickable. You MUST NOT interact with that widget again. Try a different widget or use Action_Type: "back".
-4. LEARN FROM FAILURES: Pay close attention to the testing history. Actions marked with [NO_EFFECT], [无效操作], [FAILED], or [失败] indicate broken/unclickable widgets. You MUST NEVER attempt those specific widgets again.
-5. AVOID EXPLORED PATHS: Widgets marked with "[ALREADY EXPLORED]" have been tested in previous sessions. You MUST severely deprioritize them. Always choose fresh, unmarked widgets to maximize code coverage.
-6. USE SCROLLING: If you have explored visible widgets and suspect more content below, use Action_Type: "scroll_down" to discover hidden content.
-7. USE BACK BUTTON: If you have fully explored the current page, or want to escape, use Action_Type: "back".
-8. PRIORITIZE INPUTS: Always fill out text fields BEFORE clicking submit buttons.
-
-VALID ACTION TYPES:
-- "click": Click on a widget (requires Target_Widget)
-- "input": Input text into a text field (requires Target_Widget and Input_Content)
-- "back": Press the back button (no Target_Widget needed)
-- "home": Press the home button (no Target_Widget needed)
-- "scroll_down": Scroll down the screen (no Target_Widget needed)
-- "scroll_up": Scroll up the screen (no Target_Widget needed)
-
-MANDATORY OUTPUT FORMAT:
-You MUST output ONLY a single JSON code block with the following 5 fields:
-
-```json
-{
-  "Thought": "Your reasoning about the current state and why you choose this action",
-  "Action_Type": "click/input/back/home/scroll_down/scroll_up",
-  "Target_Widget": "ExactWidgetName from the widget list (null for back/home/scroll)",
-  "Input_Content": "Text to input (null for non-input actions)",
-  "Status": "Testing status or function description"
-}
-```
-
-EXAMPLES:
-
-Example 1 (Click action):
-```json
-{
-  "Thought": "The Login button is visible and not yet explored. I should click it to navigate to the login page.",
-  "Action_Type": "click",
-  "Target_Widget": "Login",
-  "Input_Content": null,
-  "Status": "Testing login flow"
-}
-```
-
-Example 2 (Input action):
-```json
-{
-  "Thought": "There is a search input field. I should input a test query to verify search functionality.",
-  "Action_Type": "input",
-  "Target_Widget": "SearchBox",
-  "Input_Content": "test query",
-  "Status": "Testing search feature"
-}
-```
-
-Example 3 (Back action):
-```json
-{
-  "Thought": "I have explored all widgets on this page. I should go back to continue testing.",
-  "Action_Type": "back",
-  "Target_Widget": null,
-  "Input_Content": null,
-  "Status": "Navigating back"
-}
-```
-
-Example 4 (Scroll action):
-```json
-{
-  "Thought": "There might be more content below the visible area. I should scroll down to discover hidden widgets.",
-  "Action_Type": "scroll_down",
-  "Target_Widget": null,
-  "Input_Content": null,
-  "Status": "Exploring hidden content"
-}
-```
-
-IMPORTANT: Output ONLY the JSON block. No additional text, no explanations outside the JSON.
-"""
 
 
 class LLMClient:
@@ -245,12 +163,13 @@ class LLMClient:
             self.client = None
             self._is_mock_mode = True
 
-    def get_decision(self, prompt: str) -> str:
+    def get_decision(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """
         根据提示词获取 LLM 的测试决策
 
         Args:
             prompt: 构建好的测试提示词，包含 GUI 上下文和测试历史
+            system_prompt: 系统提示词，定义 LLM 角色和行为规范
 
         Returns:
             LLM 的响应字符串，格式示例：
@@ -260,9 +179,9 @@ class LLMClient:
         if self._is_mock_mode or not self.client:
             return self._get_mock_response(prompt)
 
-        return self._call_llm_api(prompt)
+        return self._call_llm_api(prompt, system_prompt)
 
-    def _call_llm_api(self, prompt: str) -> str:
+    def _call_llm_api(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """
         调用 LLM API 获取真实响应
 
@@ -270,43 +189,114 @@ class LLMClient:
 
         Args:
             prompt: 测试提示词
+            system_prompt: 系统提示词，可选
 
         Returns:
             LLM 响应字符串，失败时返回安全默认动作
         """
+        # 获取 Token 监控器
+        monitor = get_token_monitor()
+        monitor.start_request()
+
         try:
+            # ========== 打印发送给模型的提示词 ==========
+            safe_print("\n" + "=" * 70)
+            safe_print("[LLM客户端] 发送给模型的提示词:")
+            safe_print("=" * 70)
+            safe_print(prompt)
+            safe_print("=" * 70 + "\n")
+
             safe_print("[LLM客户端] 正在调用 API...")
+            request_start_time = time.time()
 
             # 安全编码 Prompt：强制 UTF-8 转换，确保所有字符都能被网络库接受
             # 使用 'ignore' 忽略无法编码的字符，避免 UnicodeEncodeError
             safe_prompt = prompt.encode('utf-8', 'ignore').decode('utf-8')
 
+            # 构建消息列表
+            messages = []
+            if system_prompt:
+                messages.append({
+                    "role": "system",
+                    "content": system_prompt
+                })
+            messages.append({
+                "role": "user",
+                "content": safe_prompt
+            })
+
+            # 使用流式响应来监控首token延迟
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": SYSTEM_PROMPT
-                    },
-                    {
-                        "role": "user",
-                        "content": safe_prompt
-                    }
-                ],
+                messages=messages,
                 temperature=0.3,  # 降低随机性，提高决策一致性
-                max_tokens=150    # 足够输出操作指令
+                max_tokens=500,   # 足够输出完整的 ReAct JSON 响应
+                stream=True       # 启用流式响应以监控首token延迟
             )
 
-            # 提取响应内容
-            if response.choices and len(response.choices) > 0:
-                result = response.choices[0].message.content.strip()
-                safe_print(f"[LLM客户端] API 响应: {result}")
+            # 提取响应内容（流式）
+            result_chunks = []
+            first_token_received = False
+
+            for chunk in response:
+                # 记录首token时间
+                if not first_token_received:
+                    monitor.record_first_token()
+                    first_token_latency = (time.time() - request_start_time) * 1000
+                    safe_print(f"[Token监控] 首Token延迟: {first_token_latency:.0f} ms")
+                    first_token_received = True
+
+                # 提取内容
+                if chunk.choices and chunk.choices[0].delta.content:
+                    result_chunks.append(chunk.choices[0].delta.content)
+
+            result = ''.join(result_chunks).strip()
+
+            # 计算生成时间
+            total_time = time.time() - request_start_time
+
+            # 估算Token数量（OpenAI API可能不返回usage信息在流式模式下）
+            prompt_tokens = monitor.estimate_prompt_tokens(system_prompt or "") + monitor.estimate_prompt_tokens(prompt)
+            completion_tokens = monitor.estimate_prompt_tokens(result)
+
+            # 记录监控数据
+            metric = monitor.end_request(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                prompt_text=prompt
+            )
+
+            # ========== 打印 Token 监控数据 ==========
+            safe_print("\n" + "-" * 70)
+            safe_print("[Token监控] 本次请求统计:")
+            safe_print(f"  提示词Token: {metric.prompt_tokens}")
+            safe_print(f"  生成Token: {metric.completion_tokens}")
+            safe_print(f"  总Token: {metric.total_tokens}")
+            safe_print(f"  首Token延迟: {metric.first_token_latency_ms:.0f} ms")
+            safe_print(f"  总延迟: {metric.total_latency_ms:.0f} ms")
+            safe_print(f"  生成速度: {metric.tokens_per_second:.1f} tokens/s")
+            safe_print("-" * 70 + "\n")
+
+            # ========== 打印模型的完整回答 ==========
+            if result:
+                safe_print("\n" + "=" * 70)
+                safe_print("[LLM客户端] 模型的回答:")
+                safe_print("=" * 70)
+                safe_print(result)
+                safe_print("=" * 70 + "\n")
+
                 return result
             else:
                 safe_print("[LLM客户端] API 返回空响应，使用安全默认动作")
                 return self.SAFE_FALLBACK_ACTION
 
         except Exception as e:
+            # 记录失败的请求
+            try:
+                monitor.end_request(prompt_tokens=0, completion_tokens=0, prompt_text="")
+            except:
+                pass
+
             # 详细的错误处理
             error_type = type(e).__name__
             safe_print(f"[LLM客户端] API 调用失败 [{error_type}]: {e}")
@@ -339,6 +329,13 @@ class LLMClient:
         Returns:
             模拟的响应字符串
         """
+        # ========== 打印发送给模型的提示词 ==========
+        safe_print("\n" + "=" * 70)
+        safe_print("[LLM客户端 - 模拟模式] 发送给模型的提示词:")
+        safe_print("=" * 70)
+        safe_print(prompt)
+        safe_print("=" * 70 + "\n")
+
         safe_print("[LLM客户端] 使用模拟模式返回测试决策")
 
         # 尝试从 prompt 中提取控件名称
@@ -375,7 +372,14 @@ class LLMClient:
   "Status": "Mock mode testing"
 }}
 ```'''
-                safe_print(f"[LLM客户端] 模拟响应: {mock_response}")
+
+                # ========== 打印模型的回答 ==========
+                safe_print("\n" + "=" * 70)
+                safe_print("[LLM客户端 - 模拟模式] 模型的回答:")
+                safe_print("=" * 70)
+                safe_print(mock_response)
+                safe_print("=" * 70 + "\n")
+
                 return mock_response
 
         # 默认模拟响应（ReAct JSON 格式）
@@ -388,7 +392,14 @@ class LLMClient:
   "Status": "Mock mode default"
 }
 ```'''
-        safe_print(f"[LLM客户端] 模拟响应: {mock_response}")
+
+        # ========== 打印模型的回答 ==========
+        safe_print("\n" + "=" * 70)
+        safe_print("[LLM客户端 - 模拟模式] 模型的回答:")
+        safe_print("=" * 70)
+        safe_print(mock_response)
+        safe_print("=" * 70 + "\n")
+
         return mock_response
 
     def is_mock_mode(self) -> bool:

@@ -1,19 +1,31 @@
 """
 ADB 工具模块
 封装 ADB 命令用于移动端 GUI 自动化测试
+支持 UIAutomator2 进行高级控件操作
 """
 
 import subprocess
 import time
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
+
+# 尝试导入 uiautomator2，如果未安装则给出提示
+try:
+    import uiautomator2 as u2
+    UIAUTOMATOR2_AVAILABLE = True
+except ImportError:
+    UIAUTOMATOR2_AVAILABLE = False
+    print("[警告] uiautomator2 未安装，某些高级功能将不可用")
+    print("[提示] 请运行: pip install uiautomator2")
+
 
 
 class ADBController:
     """
     ADB 控制器类
     封装常用的 ADB 命令，用于与 Android 设备进行交互
+    同时支持 UIAutomator2 进行高级控件操作（如 clear_text, send_keys）
     """
 
     def __init__(self, device_id: Optional[str] = None):
@@ -25,6 +37,30 @@ class ADBController:
                        可通过 `adb devices` 命令查看
         """
         self.device_id = device_id
+        self._u2_device = None  # UIAutomator2 设备实例 (类型: Optional[u2.Device])
+
+    def _get_u2_device(self):  # -> Optional[u2.Device]
+        """
+        获取 UIAutomator2 设备实例（延迟初始化）
+
+        Returns:
+            UIAutomator2 Device 实例，如果不可用则返回 None
+        """
+        if not UIAUTOMATOR2_AVAILABLE:
+            return None
+
+        if self._u2_device is None:
+            try:
+                if self.device_id:
+                    self._u2_device = u2.connect(self.device_id)
+                else:
+                    self._u2_device = u2.connect()
+                print(f"[UIAutomator2] 成功连接到设备")
+            except Exception as e:
+                print(f"[UIAutomator2] 连接失败: {e}")
+                self._u2_device = None
+
+        return self._u2_device
 
     def _build_adb_command(self, cmd: str) -> list[str]:
         """
@@ -247,9 +283,8 @@ class ADBController:
         导出当前界面的 UI 层级结构
 
         执行流程：
-        1. 在设备上执行 uiautomator dump 生成 XML 文件
-        2. 等待 1.5 秒确保文件生成完成
-        3. 将 XML 文件从设备拉取到本地
+        1. 优先使用 UIAutomator2 的 dump_hierarchy() 方法（如果可用）
+        2. 否则使用 ADB uiautomator dump 命令
 
         Args:
             save_dir: 本地保存目录，默认为 temp_data
@@ -257,7 +292,7 @@ class ADBController:
         Returns:
             成功时返回本地文件的 Path 对象，失败时返回 None
         """
-        # 设备上的 dump 文件路径
+        # 设备上的 dump 文件路径（ADB 方式使用）
         device_ui_path = "/sdcard/window_dump.xml"
 
         # 确保本地目录存在
@@ -265,6 +300,24 @@ class ADBController:
         local_dir.mkdir(parents=True, exist_ok=True)
         local_output_path = local_dir / "current_ui.xml"
 
+        # 优先尝试使用 UIAutomator2 的 dump_hierarchy()
+        if UIAUTOMATOR2_AVAILABLE:
+            try:
+                print("[UI导出] 尝试使用 UIAutomator2 dump_hierarchy()...")
+                device = self._get_u2_device()
+                if device:
+                    # 使用 UIAutomator2 获取 UI 层次结构
+                    xml_content = device.dump_hierarchy()
+                    if xml_content:
+                        # 保存到本地文件
+                        with open(local_output_path, 'w', encoding='utf-8') as f:
+                            f.write(xml_content)
+                        print(f"[UI导出成功] 使用 UIAutomator2，文件已保存到: {local_output_path}")
+                        return local_output_path
+            except Exception as e:
+                print(f"[UIAutomator2] dump_hierarchy 失败: {e}，尝试 ADB 方式...")
+
+        # 回退到 ADB uiautomator dump 方式
         try:
             # 步骤1: 在设备上执行 uiautomator dump
             print("[UI导出] 正在执行 uiautomator dump...")
@@ -386,6 +439,56 @@ class ADBController:
         # 所有策略都失败
         print("[Activity获取失败] 所有策略均未成功")
         return "UnknownActivity"
+
+    def get_current_package(self) -> str:
+        """
+        获取当前处于焦点的应用包名
+
+        Returns:
+            包名字符串，如 'com.android.settings'
+            获取失败返回 'unknown.package'
+        """
+        # 使用与 get_current_activity 相同的策略
+        strategies = [
+            {
+                "name": "mResumedActivity",
+                "cmd": "dumpsys activity activities",
+                "keyword": "mResumedActivity"
+            },
+            {
+                "name": "mCurrentFocus",
+                "cmd": "dumpsys window windows",
+                "keyword": "mCurrentFocus"
+            }
+        ]
+
+        for strategy in strategies:
+            try:
+                print(f"[包名获取] 尝试策略: {strategy['name']}")
+                result = self._execute_shell(strategy["cmd"], timeout=10)
+
+                if result.returncode != 0:
+                    continue
+
+                output = result.stdout
+                # 在 Python 中搜索，而不是用 grep
+                for line in output.split("\n"):
+                    if strategy["keyword"] in line:
+                        # 从行中提取包名
+                        # 格式: mCurrentFocus=Window{xxx com.example.app/...}
+                        # 或: mResumedActivity: ActivityRecord{... com.example.app/...}
+                        match = re.search(r'([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)/', line)
+                        if match:
+                            package_name = match.group(1)
+                            print(f"[包名获取成功] {package_name}")
+                            return package_name
+
+            except Exception as e:
+                print(f"[包名获取] 策略 {strategy['name']} 异常: {e}")
+                continue
+
+        print("[包名获取失败] 所有策略均未成功")
+        return "unknown.package"
 
     def _extract_activity_from_line(self, line: str) -> Optional[str]:
         """
@@ -525,7 +628,7 @@ class ADBController:
             print(f"[组件名解析异常] {e}")
             return None
 
-    def input_text(self, text: str) -> bool:
+    def input_text(self, text: str, clear_first: bool = False) -> bool:
         """
         使用 ADB input text 命令输入文本
 
@@ -535,6 +638,7 @@ class ADBController:
 
         Args:
             text: 要输入的文本字符串
+            clear_first: 是否先清除输入框内容
 
         Returns:
             True 表示输入成功，False 表示失败
@@ -544,6 +648,23 @@ class ADBController:
             return False
 
         try:
+            # 如果需要，先清除输入框
+            if clear_first:
+                print("[ADB输入] 先清除输入框内容...")
+                # 发送 Ctrl+A 选择全部，然后 Del 删除
+                # KEYCODE_CTRL_LEFT = 113, KEYCODE_A = 29, KEYCODE_DEL = 67
+                self._execute_shell("input keyevent 113")  # CTRL
+                time.sleep(0.05)
+                self._execute_shell("input keyevent 29")   # A (全选)
+                time.sleep(0.05)
+                self._execute_shell("input keyevent 67")   # DEL (删除)
+                time.sleep(0.1)
+                # 再发送几次 DEL 确保清除
+                for _ in range(3):
+                    self._execute_shell("input keyevent 67")
+                    time.sleep(0.05)
+                print("[ADB输入] 清除完成")
+
             # 转义特殊字符
             escaped_text = text
             # 1. 空格替换为 %s（ADB input text 的特殊语法）
@@ -572,6 +693,139 @@ class ADBController:
         except Exception as e:
             print(f"[输入失败] 异常: {e}")
             return False
+
+    def clear_and_input_text(self, widget_info: Dict[str, Any], text: str) -> bool:
+        """
+        使用 UIAutomator2 清除输入框并输入文本
+
+        优先使用 UIAutomator2 的 clear_text() 和 send_keys() 方法，
+        如果 UIAutomator2 不可用则回退到 ADB 方式。
+
+        Args:
+            widget_info: 控件信息字典，包含 text, resource_id, bounds 等
+            text: 要输入的文本字符串
+
+        Returns:
+            True 表示输入成功，False 表示失败
+        """
+        if not text:
+            print("[输入失败] 文本为空")
+            return False
+
+        # 尝试使用 UIAutomator2
+        device = self._get_u2_device()
+        if device is None:
+            print("[UIAutomator2] 不可用，回退到 ADB 输入方式（带清除）")
+            return self.input_text(text, clear_first=True)
+
+        try:
+            # 构建选择器来查找元素
+            selector = self._build_u2_selector(widget_info)
+            if selector is None:
+                print("[UIAutomator2] 无法构建选择器，回退到 ADB 输入方式（带清除）")
+                print(f"[UIAutomator2-调试] widget_info: {widget_info}")
+                return self.input_text(text, clear_first=True)
+
+            # 查找元素
+            print(f"[UIAutomator2] 尝试查找元素，选择器: {selector}")
+            element = device(**selector)
+
+            # 检查元素是否存在
+            print(f"[UIAutomator2] 检查元素是否存在...")
+            exists = element.exists
+            print(f"[UIAutomator2] 元素 exists: {exists}")
+
+            if not exists:
+                print(f"[UIAutomator2] 未找到元素，回退到 ADB 输入方式（带清除）")
+                # 尝试打印当前页面所有 EditText 用于调试
+                try:
+                    all_edit_texts = device(className="android.widget.EditText")
+                    if all_edit_texts.exists:
+                        print(f"[UIAutomator2-调试] 当前页面所有 EditText:")
+                        for i, e in enumerate(all_edit_texts, 1):
+                            print(f"  [{i}] resourceId: {e.info.get('resourceName', 'N/A')}, text: {e.info.get('text', 'N/A')[:30]}")
+                except Exception as debug_e:
+                    print(f"[UIAutomator2-调试] 获取调试信息失败: {debug_e}")
+                return self.input_text(text, clear_first=True)
+
+            # 点击元素获取焦点
+            print(f"[UIAutomator2] 点击输入框获取焦点...")
+            element.click()
+            time.sleep(0.3)
+
+            # 清除旧文本
+            print(f"[UIAutomator2] 清除输入框中的旧文本...")
+            element.clear_text()
+            time.sleep(0.2)
+
+            # 输入新文本
+            print(f"[UIAutomator2] 输入文本: '{text}'")
+            element.send_keys(text)
+
+            print(f"[UIAutomator2] 输入成功")
+            return True
+
+        except Exception as e:
+            print(f"[UIAutomator2] 操作异常: {e}，回退到 ADB 输入方式（带清除）")
+            return self.input_text(text, clear_first=True)
+
+    def _build_u2_selector(self, widget_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        根据控件信息构建 UIAutomator2 选择器
+
+        Args:
+            widget_info: 控件信息字典
+
+        Returns:
+            UIAutomator2 选择器字典，如果无法构建则返回 None
+        """
+        if not widget_info:
+            print("[UIAutomator2-选择器] widget_info 为空，无法构建选择器")
+            return None
+
+        selector = {}
+
+        # 优先使用 resource-id（支持部分匹配）
+        resource_id = widget_info.get("resource_id", "")
+        if resource_id:
+            # 提取 id 名称（兼容完整格式和截断格式）
+            if ":id/" in resource_id:
+                id_name = resource_id.split(":id/")[-1]
+            elif "/" in resource_id:
+                id_name = resource_id.split("/")[-1]
+            else:
+                id_name = resource_id
+
+            # 使用 resourceIdMatches 支持正则匹配，兼容不同包名前缀
+            # 例如：org.wikipedia:id/search_src_text 或 search_src_text 都能匹配
+            selector["resourceIdMatches"] = f".*[:/]{id_name}$"
+            print(f"[UIAutomator2-选择器] 使用 resourceIdMatches: .*[:/]{id_name}$")
+            print(f"[UIAutomator2-选择器] 原始 resource_id: {resource_id}")
+            return selector
+
+        # 其次使用 text
+        text = widget_info.get("text", "")
+        if text and text.strip():
+            selector["text"] = text.strip()
+            print(f"[UIAutomator2-选择器] 使用 text: {text.strip()}")
+            return selector
+
+        # 最后使用 class 和 clickable 组合
+        class_name = widget_info.get("class", "")
+        if class_name and "EditText" in class_name:
+            selector["className"] = "android.widget.EditText"
+            print(f"[UIAutomator2-选择器] 使用 className: android.widget.EditText")
+            return selector
+
+        # 如果以上都无法匹配，尝试使用 description
+        description = widget_info.get("content_desc", "")
+        if description:
+            selector["description"] = description
+            print(f"[UIAutomator2-选择器] 使用 description: {description}")
+            return selector
+
+        print(f"[UIAutomator2-选择器] 无法构建有效选择器，widget_info: {widget_info}")
+        return None
 
     def clear_logcat(self) -> bool:
         """
