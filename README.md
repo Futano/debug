@@ -1,4 +1,4 @@
-# GPTDroid - LLM-Driven Android GUI Automated Testing Tool
+# GUIdebuger - LLM-Driven Android GUI Automated Testing Tool
 
 An LLM-based automated testing framework for Android applications, enabling fully autonomous GUI exploration testing.
 
@@ -24,7 +24,7 @@ An LLM-based automated testing framework for Android applications, enabling full
 ## Project Structure
 
 ```
-GPTDroid/
+GUIdebuger/
 ├── main.py                         # Main program entry (Outer Loop)
 
 ├── env_interactor/                 # Environment interaction layer
@@ -67,7 +67,7 @@ GPTDroid/
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          GPTDroid Multimodal Architecture                    │
+│                          GUIdebuger Multimodal Architecture                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
@@ -683,18 +683,6 @@ min_confidence = 0.7      # Minimum confidence threshold
 - **ReAct Architecture** (Reasoning and Acting)
 - **Multimodal LLM** - Image + text analysis
 - **Dual-Agent Architecture** - Explorer + Supervisor
-
----
-
-## Architecture Design Reference
-
-This project follows the core design of the GPTDroid paper:
-
-1. **ReAct Paradigm**: Reasoning → Acting
-2. **Three-Phase Prompts**: Initial → Test → Feedback
-3. **Memory System**: TestingSequenceMemorizer (operation history, function tracking, expected results)
-4. **Bug Oracle**: Crash detection + Prompt-based bug detection + Supervisor review
-5. **Dual-Agent Architecture**: Independent Supervisor for quality assurance
 
 ---
 
