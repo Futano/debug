@@ -8,7 +8,7 @@ import subprocess
 import time
 import re
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 # 尝试导入 uiautomator2，如果未安装则给出提示
 try:
@@ -27,6 +27,22 @@ class ADBController:
     封装常用的 ADB 命令，用于与 Android 设备进行交互
     同时支持 UIAutomator2 进行高级控件操作（如 clear_text, send_keys）
     """
+
+    # Launcher Activity 黑名单（桌面启动器）
+    LAUNCHER_ACTIVITY_BLACKLIST = {
+        'NexusLauncherActivity',
+        'LauncherActivity',
+        'Launcher',
+        'HomeActivity',
+    }
+
+    # Launcher 包名黑名单
+    LAUNCHER_PACKAGE_BLACKLIST = {
+        'com.android.systemui',
+        'com.android.launcher',
+        'com.android.launcher3',
+        'com.google.android.apps.nexuslauncher',
+    }
 
     def __init__(self, device_id: Optional[str] = None):
         """
@@ -238,13 +254,47 @@ class ADBController:
             True 表示命令执行成功，False 表示失败
         """
         try:
-            # 从 (500, 1500) 滑动到 (500, 500)，模拟向上滑动手势
-            result = self._execute_shell("input swipe 500 1500 500 500 500")
+            # 获取屏幕分辨率
+            width, height = self.get_screen_resolution()
+
+            # 动态计算滚动坐标
+            # 从屏幕 80% 高度滑动到 20% 高度
+            start_y = int(height * 0.8)
+            end_y = int(height * 0.2)
+            center_x = width // 2
+
+            # 优先尝试 UIAutomator2 滚动
+            if UIAUTOMATOR2_AVAILABLE:
+                try:
+                    device = self._get_u2_device()
+                    if device:
+                        print(f"[滚动] 尝试 UIAutomator2 滚动...")
+                        # 使用 UIAutomator2 的 fling 向上滑动（内容向下滚动）
+                        device(scrollable=True).fling.forward()
+                        print("[滚动成功] UIAutomator2 滚动完成")
+                        return True
+                except Exception as e:
+                    print(f"[滚动] UIAutomator2 滚动失败: {e}，尝试 ADB 方式...")
+
+            # 回退到 ADB input swipe
+            swipe_cmd = f"input swipe {center_x} {start_y} {center_x} {end_y} 500"
+            print(f"[滚动] 执行 ADB: {swipe_cmd}")
+            print(f"[滚动] 屏幕尺寸: {width}x{height}, 滑动距离: {start_y - end_y}px")
+
+            result = self._execute_shell(swipe_cmd)
+
+            # 详细输出执行结果
+            print(f"[滚动] 命令返回码: {result.returncode}")
+            if result.stdout:
+                print(f"[滚动] stdout: {result.stdout.strip()}")
+            if result.stderr:
+                print(f"[滚动] stderr: {result.stderr.strip()}")
+
             if result.returncode == 0:
                 print("[滚动成功] 已向下滚动屏幕")
                 return True
             else:
-                print(f"[滚动失败] 错误信息: {result.stderr}")
+                print(f"[滚动失败] 返回码非零")
                 return False
         except subprocess.TimeoutExpired:
             print("[滚动失败] 命令执行超时")
@@ -263,13 +313,47 @@ class ADBController:
             True 表示命令执行成功，False 表示失败
         """
         try:
-            # 从 (500, 500) 滑动到 (500, 1500)，模拟向下滑动手势
-            result = self._execute_shell("input swipe 500 500 500 1500 500")
+            # 获取屏幕分辨率
+            width, height = self.get_screen_resolution()
+
+            # 动态计算滚动坐标
+            # 从屏幕 20% 高度滑动到 80% 高度
+            start_y = int(height * 0.2)
+            end_y = int(height * 0.8)
+            center_x = width // 2
+
+            # 优先尝试 UIAutomator2 滚动
+            if UIAUTOMATOR2_AVAILABLE:
+                try:
+                    device = self._get_u2_device()
+                    if device:
+                        print(f"[滚动] 尝试 UIAutomator2 滚动...")
+                        # 使用 UIAutomator2 的 fling 向下滑动（内容向上滚动）
+                        device(scrollable=True).fling.backward()
+                        print("[滚动成功] UIAutomator2 滚动完成")
+                        return True
+                except Exception as e:
+                    print(f"[滚动] UIAutomator2 滚动失败: {e}，尝试 ADB 方式...")
+
+            # 回退到 ADB input swipe
+            swipe_cmd = f"input swipe {center_x} {start_y} {center_x} {end_y} 500"
+            print(f"[滚动] 执行 ADB: {swipe_cmd}")
+            print(f"[滚动] 屏幕尺寸: {width}x{height}, 滑动距离: {end_y - start_y}px")
+
+            result = self._execute_shell(swipe_cmd)
+
+            # 详细输出执行结果
+            print(f"[滚动] 命令返回码: {result.returncode}")
+            if result.stdout:
+                print(f"[滚动] stdout: {result.stdout.strip()}")
+            if result.stderr:
+                print(f"[滚动] stderr: {result.stderr.strip()}")
+
             if result.returncode == 0:
                 print("[滚动成功] 已向上滚动屏幕")
                 return True
             else:
-                print(f"[滚动失败] 错误信息: {result.stderr}")
+                print(f"[滚动失败] 返回码非零")
                 return False
         except subprocess.TimeoutExpired:
             print("[滚动失败] 命令执行超时")
@@ -359,13 +443,14 @@ class ADBController:
         采用多命令回退策略，依次尝试以下三条命令，直到成功为止：
         1. dumpsys activity activities | grep mResumedActivity  (推荐，Android 10+)
         2. dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp'
-        3. dumpsys activity top | grep ACTIVITY
+        3. dumpsys activity top | grep ACTIVITY (改进版：收集所有行，过滤 Launcher)
+        4. UIAutomator2 device.app_current() 作为兜底
 
         Returns:
             Activity 名称字符串，格式示例：'Settings'
             如果获取失败或无法解析，返回 'UnknownActivity'
         """
-        # 定义三种获取策略
+        # 定义获取策略
         strategies = [
             {
                 "name": "mResumedActivity",
@@ -383,7 +468,7 @@ class ADBController:
                 "name": "ACTIVITY",
                 "cmd": "dumpsys activity top",
                 "keywords": ["ACTIVITY"],
-                "description": "dumpsys activity top"
+                "description": "dumpsys activity top (improved)"
             }
         ]
 
@@ -398,8 +483,43 @@ class ADBController:
                     print(f"[Activity获取] 命令执行失败，尝试下一策略")
                     continue
 
-                # 从输出中查找目标行
                 output = result.stdout
+
+                # ========== 特殊处理：策略3 dumpsys activity top ==========
+                # 该策略输出任务栈历史记录，需要收集所有 ACTIVITY 行并过滤 Launcher
+                if strategy["name"] == "ACTIVITY":
+                    # 收集所有 ACTIVITY 行
+                    activity_lines = []
+                    for line in output.split("\n"):
+                        line_stripped = line.strip()
+                        if "ACTIVITY" in line_stripped:
+                            activity_lines.append(line_stripped)
+
+                    if not activity_lines:
+                        print(f"[Activity获取] 未找到 ACTIVITY 信息，尝试下一策略")
+                        continue
+
+                    print(f"[Activity获取] 收集到 {len(activity_lines)} 个 ACTIVITY 行")
+
+                    # 从后往前查找（栈顶通常是最后一个）
+                    for act_line in reversed(activity_lines):
+                        print(f"[Activity获取] 检查 ACTIVITY 行: {act_line[:80]}...")
+                        activity_name = self._extract_activity_from_line(act_line)
+
+                        if activity_name:
+                            # 过滤 Launcher Activity
+                            if activity_name in self.LAUNCHER_ACTIVITY_BLACKLIST:
+                                print(f"[Activity获取] 过滤 Launcher: {activity_name}，尝试下一行")
+                                continue
+
+                            print(f"[Activity获取成功] 当前 Activity: {activity_name}")
+                            return activity_name
+
+                    # 如果都被过滤了，继续尝试其他策略
+                    print(f"[Activity获取] 所有 ACTIVITY 行均为 Launcher，尝试下一策略")
+                    continue
+
+                # ========== 常规策略处理 ==========
                 matched_line = None
                 matched_keyword = None
 
@@ -423,6 +543,11 @@ class ADBController:
                 activity_name = self._extract_activity_from_line(matched_line)
 
                 if activity_name:
+                    # 过滤 Launcher Activity
+                    if activity_name in self.LAUNCHER_ACTIVITY_BLACKLIST:
+                        print(f"[Activity获取] 过滤 Launcher: {activity_name}，尝试下一策略")
+                        continue
+
                     print(f"[Activity获取成功] 当前 Activity: {activity_name}")
                     return activity_name
                 else:
@@ -436,8 +561,15 @@ class ADBController:
                 print(f"[Activity获取] 异常: {e}，尝试下一策略")
                 continue
 
-        # 所有策略都失败
-        print("[Activity获取失败] 所有策略均未成功")
+        # ========== 所有 ADB 策略都失败，尝试 UIAutomator2 作为兜底 ==========
+        print("[Activity获取] 所有 ADB 策略失败，尝试 UIAutomator2...")
+
+        u2_pkg, u2_activity = self.get_current_activity_u2()
+        if u2_activity and u2_activity not in self.LAUNCHER_ACTIVITY_BLACKLIST:
+            print(f"[Activity获取成功] UIAutomator2: {u2_activity}")
+            return u2_activity
+
+        print("[Activity获取失败] 所有方法均未成功")
         return "UnknownActivity"
 
     def get_current_package(self) -> str:
@@ -448,16 +580,26 @@ class ADBController:
             包名字符串，如 'com.android.settings'
             获取失败返回 'unknown.package'
         """
-        # 使用与 get_current_activity 相同的策略
+        # 多种策略，适应不同安卓版本
         strategies = [
             {
-                "name": "mResumedActivity",
+                "name": "mResumedActivity (dumpsys activity activities)",
                 "cmd": "dumpsys activity activities",
                 "keyword": "mResumedActivity"
             },
             {
-                "name": "mCurrentFocus",
+                "name": "mCurrentFocus (dumpsys window windows)",
                 "cmd": "dumpsys window windows",
+                "keyword": "mCurrentFocus"
+            },
+            {
+                "name": "top-activity (dumpsys activity top)",
+                "cmd": "dumpsys activity top",
+                "keyword": "ACTIVITY"  # 新格式: ACTIVITY com.xxx.xxx/...
+            },
+            {
+                "name": "focused-app (dumpsys window)",
+                "cmd": "dumpsys window",
                 "keyword": "mCurrentFocus"
             }
         ]
@@ -465,30 +607,91 @@ class ADBController:
         for strategy in strategies:
             try:
                 print(f"[包名获取] 尝试策略: {strategy['name']}")
-                result = self._execute_shell(strategy["cmd"], timeout=10)
+                result = self._execute_shell(strategy["cmd"], timeout=15)
 
                 if result.returncode != 0:
+                    print(f"[包名获取] 命令失败，返回码: {result.returncode}")
                     continue
 
                 output = result.stdout
-                # 在 Python 中搜索，而不是用 grep
-                for line in output.split("\n"):
-                    if strategy["keyword"] in line:
-                        # 从行中提取包名
-                        # 格式: mCurrentFocus=Window{xxx com.example.app/...}
-                        # 或: mResumedActivity: ActivityRecord{... com.example.app/...}
-                        match = re.search(r'([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)/', line)
-                        if match:
-                            package_name = match.group(1)
-                            print(f"[包名获取成功] {package_name}")
-                            return package_name
 
+                # 在输出中搜索
+                for line in output.split("\n"):
+                    line_stripped = line.strip()
+
+                    # 跳过空行
+                    if not line_stripped:
+                        continue
+
+                    # 检查是否包含关键词
+                    if strategy["keyword"] in line_stripped:
+                        print(f"[包名获取] 匹配到行: {line_stripped[:100]}...")
+
+                        # 尝试多种正则模式提取包名
+                        patterns = [
+                            # 格式1: com.example.app/xxx 或 com.example.app/.xxx
+                            r'([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)/',
+                            # 格式2: ACTIVITY com.example.app/xxx (Android 11+)
+                            r'ACTIVITY\s+([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)/',
+                            # 格式3: 包名直接出现在 Window{...} 中
+                            r'Window\{[^}]*\s+([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)/',
+                        ]
+
+                        for pattern in patterns:
+                            match = re.search(pattern, line_stripped)
+                            if match:
+                                package_name = match.group(1)
+                                # 验证是否是合法的包名格式
+                                if '.' in package_name and len(package_name) > 3:
+                                    # 过滤掉 Launcher 和系统 UI
+                                    if package_name not in self.LAUNCHER_PACKAGE_BLACKLIST:
+                                        print(f"[包名获取成功] {package_name}")
+                                        return package_name
+
+            except subprocess.TimeoutExpired:
+                print(f"[包名获取] 命令超时，尝试下一策略")
+                continue
             except Exception as e:
-                print(f"[包名获取] 策略 {strategy['name']} 异常: {e}")
+                print(f"[包名获取] 异常: {e}，尝试下一策略")
                 continue
 
         print("[包名获取失败] 所有策略均未成功")
         return "unknown.package"
+
+    def get_current_activity_u2(self) -> Tuple[str, str]:
+        """
+        使用 UIAutomator2 获取当前 Activity（辅助验证/兜底方案）
+
+        Returns:
+            元组 (package_name, activity_name)
+            如果获取失败，返回 ("", "")
+        """
+        if not UIAUTOMATOR2_AVAILABLE:
+            return "", ""
+
+        device = self._get_u2_device()
+        if not device:
+            return "", ""
+
+        try:
+            # device.app_current() 返回当前前台应用信息
+            app_info = device.app_current()
+            package = app_info.get('package', '')
+            activity = app_info.get('activity', '')
+
+            if package and activity:
+                # 提取 Activity 简短名称
+                if '.' in activity:
+                    activity_name = activity.split('.')[-1]
+                else:
+                    activity_name = activity
+
+                print(f"[UIAutomator2] 当前应用: {package}/{activity}")
+                return package, activity_name
+        except Exception as e:
+            print(f"[UIAutomator2] 获取失败: {e}")
+
+        return "", ""
 
     def _extract_activity_from_line(self, line: str) -> Optional[str]:
         """
@@ -628,6 +831,235 @@ class ADBController:
             print(f"[组件名解析异常] {e}")
             return None
 
+    def clear_text_by_backspace(self, max_chars: int = 100) -> bool:
+        """
+        通过发送退格键清除文本（适用于 WebView 等场景）
+
+        优化策略：
+        1. 发送 KEYCODE_MOVE_END (123) 移动光标到末尾
+        2. 发送 KEYCODE_SHIFT_LEFT (59) + KEYCODE_DPAD_LEFT (21) 全选（可选）
+        3. 发送 KEYCODE_DEL (67) 删除
+
+        Args:
+            max_chars: 最多删除的字符数，默认 100
+
+        Returns:
+            True 表示成功，False 表示失败
+        """
+        try:
+            # 移动光标到末尾
+            self._execute_shell("input keyevent 123")
+            time.sleep(0.05)
+
+            # 方案A：尝试使用 Ctrl+A 全选（部分 WebView 支持）
+            # KEYCODE_CTRL_LEFT = 113, KEYCODE_A = 29
+            self._execute_shell("input keyevent 113 29")
+            time.sleep(0.1)
+            self._execute_shell("input keyevent 67")  # 删除选中内容
+            time.sleep(0.1)
+
+            # 方案B：发送多次退格键确保清除（批量发送，无延迟）
+            # 使用 shell 脚本批量发送，避免 Python 循环延迟
+            print(f"[WebView清除] 发送 {max_chars} 次退格键...")
+            # 构建 shell 命令，一次发送多个 keyevent
+            backspace_cmd = "input keyevent 67 " * max_chars
+            backspace_cmd = backspace_cmd.strip()
+            self._execute_shell(backspace_cmd)
+
+            print("[WebView清除] 清除完成")
+            return True
+        except Exception as e:
+            print(f"[WebView清除] 异常: {e}")
+            return False
+
+    def hide_keyboard(self) -> bool:
+        """
+        收起软键盘（智能策略，避免触发 Activity 返回行为）
+
+        策略优先级：
+        1. 使用 IME_ACTION_DONE (KEYCODE_ENTER=66) 完成输入，不触发返回
+        2. 如果 UIAutomator2 可用，检测键盘状态后决定是否需要操作
+
+        注意：不再使用 KEYCODE_BACK (4)，因为会在编辑类 Activity（如 NoteEditorActivity）
+        中触发 discard dialog，阻断正常流程。
+
+        Returns:
+            True 表示成功
+        """
+        try:
+            # 策略1：使用 UIAutomator2 检测键盘状态（如果可用）
+            if UIAUTOMATOR2_AVAILABLE:
+                device = self._get_u2_device()
+                if device:
+                    try:
+                        # 检测是否有输入框聚焦
+                        focused_elem = device(focused=True)
+                        if focused_elem.exists:
+                            # 发送 IME_ACTION_DONE 完成输入，不触发返回
+                            # KEYCODE_ENTER = 66 (软键盘的"完成/回车"按钮)
+                            print("[收起键盘] 发送 ENTER 键完成输入...")
+                            self._execute_shell("input keyevent 66")
+                            time.sleep(0.2)
+                            print("[收起键盘] 完成（IME_ACTION_DONE）")
+                            return True
+                        else:
+                            # 没有聚焦的输入框，键盘可能已经收起
+                            print("[收起键盘] 无聚焦输入框，无需操作")
+                            return True
+                    except Exception as e:
+                        print(f"[收起键盘] UIAutomator2 检测失败: {e}")
+
+            # 策略2：直接发送 ENTER 键（KEYCODE_ENTER = 66）
+            # 这是软键盘的"完成/回车"按钮，不会触发 Activity 返回行为
+            print("[收起键盘] 发送 ENTER 键收起键盘...")
+            self._execute_shell("input keyevent 66")
+            time.sleep(0.2)
+            print("[收起键盘] 完成")
+            return True
+        except Exception as e:
+            print(f"[收起键盘] 异常: {e}")
+            return False
+
+    def disable_soft_keyboard(self) -> bool:
+        """
+        禁用软键盘自动弹出
+
+        使用 UIAutomator2 的快速输入法 (FastInputIME)，实现无键盘输入：
+        - FastInputIME 是 u2 内置的轻量输入法，不会弹出软键盘界面
+        - 输入通过 UIAutomator2 直接注入，不经过系统输入法框架
+
+        如果 u2 不可用，则使用备用方法设置系统参数。
+
+        Returns:
+            True 表示设置成功
+        """
+        try:
+            print("[禁用键盘] 正在设置...")
+
+            # 方法1：使用 UIAutomator2 的 FastInputIME（推荐）
+            u2_device = self._get_u2_device()
+            if u2_device:
+                try:
+                    # 设置使用 FastInputIME（u2 内置的无界面输入法）
+                    u2_device.set_fastinput_ime(True)
+                    print("[禁用键盘] UIAutomator2 FastInputIME 已启用")
+                    print("[禁用键盘] 输入将直接注入，不弹出软键盘")
+                    time.sleep(0.5)
+                    return True
+                except Exception as e:
+                    print(f"[禁用键盘] FastInputIME 设置失败: {e}")
+
+            # 方法2：备用 - 设置系统参数（效果有限）
+            print("[禁用键盘] 尝试备用方法...")
+            self._execute_shell("settings put secure show_ime_with_hard_keyboard 0")
+            self._execute_shell("settings put global window_animation_scale 0")
+            self._execute_shell("settings put global transition_animation_scale 0")
+
+            # 方法3：尝试关闭当前输入法（激进方式）
+            # 获取当前默认输入法
+            default_ime = self.get_default_ime()
+            if default_ime:
+                print(f"[禁用键盘] 当前默认输入法: {default_ime}")
+                # 不直接禁用，因为这会影响用户正常使用
+                # 只在测试期间临时使用 FastInputIME
+
+            time.sleep(0.5)
+            print("[禁用键盘] 设置完成（备用方法）")
+            return True
+        except Exception as e:
+            print(f"[禁用键盘] 异常: {e}")
+            return False
+
+    def get_default_ime(self) -> str:
+        """
+        获取当前默认输入法
+
+        Returns:
+            默认输入法 ID，如 "com.google.android.inputmethod.latin/.LatinIME"
+        """
+        try:
+            result = self._execute_shell("settings get secure default_input_method")
+            ime = result.stdout.strip()
+            print(f"[输入法] 当前默认: {ime}")
+            return ime
+        except Exception as e:
+            print(f"[输入法] 获取失败: {e}")
+            return ""
+
+    def set_default_ime(self, ime_id: str) -> bool:
+        """
+        设置默认输入法
+
+        Args:
+            ime_id: 输入法 ID，如 "com.android.inputmethod.latin/.LatinIME"
+
+        Returns:
+            True 表示成功
+        """
+        try:
+            self._execute_shell(f"settings put secure default_input_method {ime_id}")
+            print(f"[输入法] 已设置为: {ime_id}")
+            return True
+        except Exception as e:
+            print(f"[输入法] 设置失败: {e}")
+            return False
+
+    def input_text_by_coordinate(
+        self,
+        center_x: int,
+        center_y: int,
+        text: str,
+        clear_first: bool = True,
+        max_clear_chars: int = 100
+    ) -> bool:
+        """
+        通过坐标定位输入框并输入文本（WebView 兜底方案）
+
+        流程：
+        1. 点击坐标获取焦点
+        2. 使用退格键清除旧文本
+        3. 输入新文本
+
+        Args:
+            center_x: 输入框中心的 X 坐标
+            center_y: 输入框中心的 Y 坐标
+            text: 要输入的文本
+            clear_first: 是否先清除旧文本
+            max_clear_chars: 清除时最多删除的字符数
+
+        Returns:
+            True 表示成功，False 表示失败
+        """
+        if not text:
+            return False
+
+        try:
+            # 点击获取焦点
+            print(f"[坐标输入] 点击 ({center_x}, {center_y})")
+            self.click(center_x, center_y)
+            time.sleep(0.3)
+
+            # 清除旧文本
+            if clear_first:
+                self.clear_text_by_backspace(max_clear_chars)
+
+            # 输入新文本
+            escaped_text = text.replace(" ", "%s")
+            escaped_text = escaped_text.replace("&", "\\&")
+            escaped_text = escaped_text.replace("(", "\\(")
+            escaped_text = escaped_text.replace(")", "\\)")
+            result = self._execute_shell(f'input text "{escaped_text}"')
+
+            if result.returncode == 0:
+                print(f"[坐标输入] 成功输入: {text}")
+                return True
+            else:
+                print(f"[坐标输入] 输入失败: {result.stderr}")
+                return False
+        except Exception as e:
+            print(f"[坐标输入] 异常: {e}")
+            return False
+
     def input_text(self, text: str, clear_first: bool = False) -> bool:
         """
         使用 ADB input text 命令输入文本
@@ -696,13 +1128,15 @@ class ADBController:
 
     def clear_and_input_text(self, widget_info: Dict[str, Any], text: str) -> bool:
         """
-        使用 UIAutomator2 清除输入框并输入文本
+        使用多层策略清除输入框并输入文本
 
-        优先使用 UIAutomator2 的 clear_text() 和 send_keys() 方法，
-        如果 UIAutomator2 不可用则回退到 ADB 方式。
+        三层策略：
+        1. UIAutomator2 原生方式 - 使用 resource_id/text/className 选择器
+        2. UIAutomator2 focused 方式 - 点击坐标后使用 focused=True 选择器
+        3. ADB 坐标方式 - 点击坐标 + MOVE_END + 退格清除 + input text
 
         Args:
-            widget_info: 控件信息字典，包含 text, resource_id, bounds 等
+            widget_info: 控件信息字典，包含 text, resource_id, bounds, center_x, center_y 等
             text: 要输入的文本字符串
 
         Returns:
@@ -712,62 +1146,71 @@ class ADBController:
             print("[输入失败] 文本为空")
             return False
 
-        # 尝试使用 UIAutomator2
         device = self._get_u2_device()
-        if device is None:
-            print("[UIAutomator2] 不可用，回退到 ADB 输入方式（带清除）")
-            return self.input_text(text, clear_first=True)
+        center_x = widget_info.get("center_x")
+        center_y = widget_info.get("center_y")
 
-        try:
-            # 构建选择器来查找元素
+        # 检查控件类型
+        class_name = widget_info.get("class", "")
+        is_edittext = class_name and "EditText" in class_name
+
+        # 调试：打印控件信息
+        print(f"[输入策略检查] class={class_name}, is_edittext={is_edittext}, center=({center_x},{center_y})")
+
+        # ========== 策略选择 ==========
+        # 关键判断：如果 class 不是 EditText，直接使用 ADB 坐标方式
+        # 因为 UIAutomator2 的 send_keys() 对 TextView 静默失败（不报错但无效）
+        # 即使 xml_parser 标记了 editable=True，也需要用 ADB 方式
+        if not is_edittext:
+            if center_x and center_y:
+                print(f"[输入策略] 控件非 EditText (class={class_name})，使用 ADB 坐标方式")
+                return self.input_text_by_coordinate(center_x, center_y, text)
+            else:
+                print(f"[输入策略] 控件非 EditText 但缺少坐标，尝试 UIAutomator2 方式")
+
+        # ========== 第一层：UIAutomator2 原生方式 ==========
+        # 仅对真正的 EditText 或可编辑控件使用
+        if device is not None:
             selector = self._build_u2_selector(widget_info)
-            if selector is None:
-                print("[UIAutomator2] 无法构建选择器，回退到 ADB 输入方式（带清除）")
-                print(f"[UIAutomator2-调试] widget_info: {widget_info}")
-                return self.input_text(text, clear_first=True)
-
-            # 查找元素
-            print(f"[UIAutomator2] 尝试查找元素，选择器: {selector}")
-            element = device(**selector)
-
-            # 检查元素是否存在
-            print(f"[UIAutomator2] 检查元素是否存在...")
-            exists = element.exists
-            print(f"[UIAutomator2] 元素 exists: {exists}")
-
-            if not exists:
-                print(f"[UIAutomator2] 未找到元素，回退到 ADB 输入方式（带清除）")
-                # 尝试打印当前页面所有 EditText 用于调试
+            if selector is not None:
                 try:
-                    all_edit_texts = device(className="android.widget.EditText")
-                    if all_edit_texts.exists:
-                        print(f"[UIAutomator2-调试] 当前页面所有 EditText:")
-                        for i, e in enumerate(all_edit_texts, 1):
-                            print(f"  [{i}] resourceId: {e.info.get('resourceName', 'N/A')}, text: {e.info.get('text', 'N/A')[:30]}")
-                except Exception as debug_e:
-                    print(f"[UIAutomator2-调试] 获取调试信息失败: {debug_e}")
-                return self.input_text(text, clear_first=True)
+                    element = device(**selector)
+                    if element.exists:
+                        print("[UIAutomator2-原生] 找到元素")
+                        element.click()
+                        time.sleep(0.2)
+                        element.clear_text()
+                        element.send_keys(text)
+                        print("[UIAutomator2-原生] 输入成功")
+                        return True
+                except Exception as e:
+                    print(f"[UIAutomator2-原生] 失败: {e}")
 
-            # 点击元素获取焦点
-            print(f"[UIAutomator2] 点击输入框获取焦点...")
-            element.click()
+        # ========== 第二层：UIAutomator2 focused 方式 ==========
+        if center_x and center_y and device is not None:
+            print(f"[UIAutomator2-focused] 点击 ({center_x}, {center_y}) 获取焦点")
+            self.click(center_x, center_y)
             time.sleep(0.3)
 
-            # 清除旧文本
-            print(f"[UIAutomator2] 清除输入框中的旧文本...")
-            element.clear_text()
-            time.sleep(0.2)
+            try:
+                element = device(focused=True)
+                if element.exists:
+                    print("[UIAutomator2-focused] 找到焦点元素")
+                    element.clear_text()
+                    element.send_keys(text)
+                    print("[UIAutomator2-focused] 输入成功")
+                    return True
+            except Exception as e:
+                print(f"[UIAutomator2-focused] 失败: {e}")
 
-            # 输入新文本
-            print(f"[UIAutomator2] 输入文本: '{text}'")
-            element.send_keys(text)
+        # ========== 第三层：ADB 坐标方式（兜底） ==========
+        if center_x and center_y:
+            print("[ADB-坐标] 使用坐标输入方式")
+            return self.input_text_by_coordinate(center_x, center_y, text)
 
-            print(f"[UIAutomator2] 输入成功")
-            return True
-
-        except Exception as e:
-            print(f"[UIAutomator2] 操作异常: {e}，回退到 ADB 输入方式（带清除）")
-            return self.input_text(text, clear_first=True)
+        # 最后回退
+        print("[ADB-回退] 使用基础 ADB 输入方式")
+        return self.input_text(text, clear_first=True)
 
     def _build_u2_selector(self, widget_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -785,7 +1228,7 @@ class ADBController:
 
         selector = {}
 
-        # 优先使用 resource-id（支持部分匹配）
+        # 1. 优先添加 resource_id（不立即返回，允许组合其他条件）
         resource_id = widget_info.get("resource_id", "")
         if resource_id:
             # 提取 id 名称（兼容完整格式和截断格式）
@@ -801,27 +1244,37 @@ class ADBController:
             selector["resourceIdMatches"] = f".*[:/]{id_name}$"
             print(f"[UIAutomator2-选择器] 使用 resourceIdMatches: .*[:/]{id_name}$")
             print(f"[UIAutomator2-选择器] 原始 resource_id: {resource_id}")
+
+        # 2. 如果有 content_desc，添加为额外条件（复合选择器：resource_id AND content_desc）
+        content_desc = widget_info.get("content_desc", "")
+        if content_desc and content_desc.strip():
+            selector["description"] = content_desc.strip()
+            print(f"[UIAutomator2-选择器] 添加 description: {content_desc.strip()}")
+
+        # 3. 如果已经有选择器条件，返回复合选择器
+        if selector:
+            if len(selector) > 1:
+                print(f"[UIAutomator2-选择器] 使用复合选择器: {selector}")
             return selector
 
-        # 其次使用 text
+        # 4. 以下为兜底逻辑：单独使用 text
         text = widget_info.get("text", "")
         if text and text.strip():
             selector["text"] = text.strip()
             print(f"[UIAutomator2-选择器] 使用 text: {text.strip()}")
             return selector
 
-        # 最后使用 class 和 clickable 组合
+        # 5. 兜底逻辑：class 和 clickable 组合
         class_name = widget_info.get("class", "")
         if class_name and "EditText" in class_name:
             selector["className"] = "android.widget.EditText"
             print(f"[UIAutomator2-选择器] 使用 className: android.widget.EditText")
             return selector
 
-        # 如果以上都无法匹配，尝试使用 description
-        description = widget_info.get("content_desc", "")
-        if description:
-            selector["description"] = description
-            print(f"[UIAutomator2-选择器] 使用 description: {description}")
+        # 6. 最后兜底：单独使用 description
+        if content_desc:
+            selector["description"] = content_desc
+            print(f"[UIAutomator2-选择器] 使用 description: {content_desc}")
             return selector
 
         print(f"[UIAutomator2-选择器] 无法构建有效选择器，widget_info: {widget_info}")
@@ -854,7 +1307,7 @@ class ADBController:
             print(f"[日志清空失败] 异常: {e}")
             return False
 
-    def check_for_crash(self) -> str:
+    def check_for_crash(self, target_package: str = None) -> str:
         """
         检查系统日志中是否存在崩溃信息（工业级精准检测）
 
@@ -870,9 +1323,12 @@ class ADBController:
         日志截取策略：一旦定位到崩溃关键字，只截取该位置前 5 行和后 100 行，
         避免写入大量无关日志。
 
+        Args:
+            target_package: 被测应用包名，用于过滤误报（如其他应用崩溃）
+
         Returns:
-            崩溃日志字符串（精简后的核心堆栈信息），如果发现崩溃；
-            如果没有检测到崩溃，返回空字符串
+            崩溃日志字符串（精简后的核心堆栈信息），如果发现被测应用崩溃；
+            如果没有检测到崩溃或崩溃来自其他应用，返回空字符串
         """
         try:
             # 执行 logcat -d 导出日志（非阻塞，只导出当前缓冲区内容）
@@ -927,6 +1383,12 @@ class ADBController:
                 crash_slice = log_lines[start_index:end_index]
                 crash_log = '\n'.join(crash_slice)
 
+                # 如果指定了目标包名，验证崩溃是否来自被测应用
+                if target_package:
+                    if not self._is_target_app_crash(crash_log, target_package):
+                        print(f"[崩溃检测] 崩溃非被测应用({target_package})，忽略")
+                        return ""
+
                 print(f"[崩溃检测] 发现真实崩溃！关键字: '{crash_keyword_found}'")
                 print(f"[崩溃检测] 日志切片: 第 {start_index+1} 行到第 {end_index} 行，共 {len(crash_slice)} 行")
                 print(f"[崩溃检测] 崩溃日志长度: {len(crash_log)} 字符（已精简）")
@@ -971,13 +1433,71 @@ class ADBController:
                             start_index = max(0, i - 5)
                             end_index = min(len(log_lines), i + 101)
                             crash_slice = log_lines[start_index:end_index]
-                            return '\n'.join(crash_slice)
+                            crash_log = '\n'.join(crash_slice)
+
+                            # 如果指定了目标包名，验证崩溃是否来自被测应用
+                            if target_package:
+                                if not self._is_target_app_crash(crash_log, target_package):
+                                    print(f"[崩溃检测] 崩溃非被测应用({target_package})，忽略")
+                                    return ""
+
+                            return crash_log
                 return ""
             except Exception:
                 return ""
         except Exception as e:
             print(f"[崩溃检测] 异常: {e}")
             return ""
+
+    def _is_target_app_crash(self, crash_log: str, target_package: str) -> bool:
+        """
+        判断崩溃日志是否来自被测应用
+
+        检查策略：
+        1. 检查日志中是否包含目标包名
+        2. 检查 FATAL EXCEPTION 后的 Process 信息
+        3. 检查 "pid.*包名" 格式
+
+        Args:
+            crash_log: 崩溃日志内容
+            target_package: 被测应用包名
+
+        Returns:
+            True 如果崩溃来自被测应用，False 如果来自其他应用
+        """
+        if not crash_log or not target_package:
+            return True  # 无目标包名时不过滤
+
+        # 策略1：直接匹配包名
+        if target_package in crash_log:
+            return True
+
+        # 策略2：匹配 Process 信息
+        # 例如：FATAL EXCEPTION: main\nProcess: com.example.app, PID: 1234
+        process_match = re.search(r'Process:\s*([^\s,]+)', crash_log)
+        if process_match:
+            process_name = process_match.group(1)
+            if process_name == target_package:
+                return True
+
+        # 策略3：检查 "Kill" 相关日志（如 lowmemorykiller）
+        # 格式：Kill 'package_name' (pid), uid xxx
+        kill_match = re.search(r"Kill\s+['\"]([^'\"]+)['\"]", crash_log)
+        if kill_match:
+            killed_package = kill_match.group(1)
+            if killed_package == target_package:
+                return True
+            else:
+                # 明确是其他应用被杀，返回 False
+                return False
+
+        # 策略4：匹配包名前缀（部分日志可能只显示短名）
+        package_short = target_package.split('.')[-1]
+        if f".{package_short}" in crash_log or f"/.{package_short}" in crash_log:
+            return True
+
+        # 默认返回 False（严格模式：不确定时认为是其他应用）
+        return False
 
     def launch_app(self, package_name: str, activity_name: Optional[str] = None) -> bool:
         """
@@ -1047,3 +1567,124 @@ class ADBController:
         except Exception as e:
             print(f"[Intent启动失败] 异常: {e}")
             return False
+
+    def screenshot(self, save_path: Optional[str] = None) -> Optional[Path]:
+        """
+        截取当前屏幕并保存到本地
+
+        执行流程：
+        1. 优先使用 UIAutomator2 的 screenshot() 方法（如果可用）
+        2. 否则使用 ADB screencap 命令
+
+        Args:
+            save_path: 本地保存路径，如果不指定则保存到 temp_data/screenshot_{timestamp}.png
+
+        Returns:
+            成功时返回本地文件的 Path 对象，失败时返回 None
+        """
+        from datetime import datetime
+
+        # 确定保存路径
+        if save_path:
+            local_path = Path(save_path)
+        else:
+            # 默认保存到 temp_data 目录
+            temp_dir = Path("temp_data")
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            local_path = temp_dir / f"screenshot_{timestamp}.png"
+
+        # 优先尝试使用 UIAutomator2 的 screenshot()
+        if UIAUTOMATOR2_AVAILABLE:
+            try:
+                print("[截图] 尝试使用 UIAutomator2 screenshot()...")
+                device = self._get_u2_device()
+                if device:
+                    # 使用 UIAutomator2 截图
+                    img = device.screenshot()
+                    if img:
+                        # 保存到本地
+                        img.save(str(local_path))
+                        print(f"[截图成功] 使用 UIAutomator2，文件已保存到: {local_path}")
+                        return local_path
+            except Exception as e:
+                print(f"[UIAutomator2] screenshot 失败: {e}，尝试 ADB 方式...")
+
+        # 回退到 ADB screencap 方式
+        try:
+            device_screenshot_path = "/sdcard/screenshot.png"
+
+            # 步骤1: 在设备上执行截图
+            print("[截图] 正在执行 screencap...")
+            screencap_result = self._execute_shell(
+                f"screencap -p {device_screenshot_path}",
+                timeout=10
+            )
+
+            if screencap_result.returncode != 0:
+                print(f"[截图失败] screencap 错误: {screencap_result.stderr}")
+                return None
+
+            # 步骤2: 等待截图生成
+            time.sleep(0.5)
+
+            # 步骤3: 拉取到本地
+            print(f"[截图] 正在拉取文件到本地: {local_path}")
+            pull_result = self._execute_adb(["pull", device_screenshot_path, str(local_path)])
+
+            if pull_result.returncode == 0 and local_path.exists():
+                print(f"[截图成功] 文件已保存到: {local_path}")
+                return local_path
+            else:
+                print(f"[截图失败] 拉取文件失败: {pull_result.stderr}")
+                return None
+
+        except subprocess.TimeoutExpired:
+            print("[截图失败] 命令执行超时")
+            return None
+        except Exception as e:
+            print(f"[截图失败] 异常: {e}")
+            return None
+
+    def get_screen_resolution(self) -> Tuple[int, int]:
+        """
+        获取设备屏幕分辨率
+
+        优先使用 UIAutomator2，回退到 ADB wm size 命令
+
+        Returns:
+            元组 (width, height)，失败返回 (1080, 1920) 作为默认值
+        """
+        # 优先尝试 UIAutomator2
+        if UIAUTOMATOR2_AVAILABLE:
+            try:
+                device = self._get_u2_device()
+                if device:
+                    info = device.info
+                    width = info.get('displayWidth', 0)
+                    height = info.get('displayHeight', 0)
+                    if width > 0 and height > 0:
+                        print(f"[分辨率获取成功] UIAutomator2: {width}x{height}")
+                        return (width, height)
+            except Exception as e:
+                print(f"[UIAutomator2] 获取分辨率失败: {e}，尝试 ADB 方式...")
+
+        # 回退到 ADB wm size 命令
+        try:
+            result = self._execute_shell("wm size", timeout=5)
+
+            if result.returncode == 0:
+                output = result.stdout
+                # 解析输出: "Physical size: 1080x1920" 或 "Override size: 1080x1920"
+                match = re.search(r'(\d+)x(\d+)', output)
+                if match:
+                    width = int(match.group(1))
+                    height = int(match.group(2))
+                    print(f"[分辨率获取成功] ADB: {width}x{height}")
+                    return (width, height)
+        except Exception as e:
+            print(f"[分辨率获取失败] 异常: {e}")
+
+        # 返回默认值
+        print("[分辨率获取失败] 使用默认值 1080x1920")
+        return (1080, 1920)

@@ -6,7 +6,25 @@
       "Bash(conda activate:*)",
       "Read(//c/Users/23956/anaconda3/**)",
       "Read(//c/Users/23956/miniconda3/**)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(conda remove:*)",
+      "Bash(conda create:*)",
+      "Read(//c//**)",
+      "Bash(source:*)",
+      "Bash(py:*)",
+      "Bash(cd:*)",
+      "Bash(ls:*)",
+      "Bash(where python:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(/c/Users/23956/AppData/Local/Programs/Python/Python312/python.exe -c \"import ast; ast.parse\\(open\\('main.py'\\).read\\(\\)\\); print\\('OK'\\)\" 2>&1 || echo \"FAILED\")",
+      "Bash(ls -la /c/Python*)",
+      "Read(//c/Users/23956/.conda/**)",
+      "Bash(/d/Anaconda3/Tools/conda-env/debug/python.exe -c \"import ast; ast.parse\\(open\\('main.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\" 2>&1)",
+      "Read(//d/Anaconda3//**)",
+      "Read(//d/Tools/Anaconda//**)",
+      "Bash(/d/Tools/Anaconda/python.exe -c \"import ast; ast.parse\\(open\\('main.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\" 2>&1)",
+      "Bash(/d/Tools/Anaconda/python.exe -c \"import ast; ast.parse\\(open\\('main.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Syntax OK'\\)\" 2>&1)",
+      "Bash(/c/Users/23956/AppData/Local/Microsoft/WindowsApps/python -c \"print\\('test'\\)\")"
     ]
   }
 }

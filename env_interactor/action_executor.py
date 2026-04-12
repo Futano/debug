@@ -2,6 +2,7 @@
 动作执行器模块
 解析 LLM 响应并执行相应的 GUI 操作
 集成崩溃检测机制，实现 GPTDroid 论文的 Bug Oracle 功能
+支持多模态 Bug 分析引擎（崩溃 + 逻辑错误）
 
 支持 ReAct JSON 格式解析，提高 LLM 决策智商
 """
@@ -19,6 +20,8 @@ from env_interactor.adb_utils import ADBController
 # 类型检查时导入，避免循环依赖
 if TYPE_CHECKING:
     from llm_agent.memory_manager import TestingSequenceMemorizer
+    from llm_agent.bug_analysis_engine import BugAnalysisEngine, BugReport
+    from llm_agent.screenshot_manager import ScreenshotManager
 
 
 # Bug 报告保存目录
@@ -34,12 +37,15 @@ class ParsedAction:
     支持功能查询响应解析（FunctionName + Status）
     支持多输入操作（多个 Widget/Input 对）
     支持输入后操作（OperationWidget）
+    支持预期结果和 Bug 检测
 
     JSON 格式示例:
     - 非输入操作:
-      {"Thought": "...", "Function": "...", "Status": "Yes/No", "Operation": "click", "Widget": "Button"}
+      {"Thought": "...", "Function": "...", "Status": "Yes/No", "Operation": "click", "Widget": "Button", "Expected_Result": "...", "Bug_Detected": false}
     - 输入操作:
-      {"Thought": "...", "Function": "...", "Status": "Yes/No", "Widget": "InputField", "Input": "text", "Operation": "click", "OperationWidget": "Submit"}
+      {"Thought": "...", "Function": "...", "Status": "Yes/No", "Widget": "InputField", "Input": "text", "Operation": "click", "OperationWidget": "Submit", "Expected_Result": "..."}
+    - Bug 检测:
+      {"Thought": "...", "Function": "...", "Status": "Yes/No", "Operation": "click", "Widget": "Button", "Expected_Result": "...", "Bug_Detected": true, "Bug_Description": {...}}
     """
     def __init__(
         self,
@@ -47,21 +53,43 @@ class ParsedAction:
         widget: Optional[str] = None,
         input_text: Optional[str] = None,
         thought: Optional[str] = None,
+        page_description: Optional[str] = None,  # NEW: 页面描述
         status: Optional[str] = None,
         function_name: Optional[str] = None,
         function_status: Optional[str] = None,
-        input_sequence: Optional[List[Tuple[str, str]]] = None,
-        operation_widget: Optional[str] = None
+        input_sequence: Optional[List[Tuple[str, str, Optional[str]]]] = None,  # 三元组：(widget, input_text, content_desc)
+        operation_widget: Optional[str] = None,
+        external_redirect: bool = False,
+        redirect_package: Optional[str] = None,
+        expected_result: Optional[str] = None,
+        bug_detected: bool = False,
+        bug_description: Optional[Dict] = None,
+        widget_type: Optional[str] = None,
+        operation_widget_type: Optional[str] = None,
+        widget_content_desc: Optional[str] = None,  # 新增：用于区分同 resource-id 的字段
+        target_x: Optional[int] = None,  # NEW: Target center X coordinate for visual positioning
+        target_y: Optional[int] = None   # NEW: Target center Y coordinate for visual positioning
     ):
         self.operation = operation
         self.widget = widget
         self.input_text = input_text
         self.thought = thought  # ReAct: 推理过程
+        self.page_description = page_description  # NEW: 页面描述（来自 LLM 的 Page_Description 字段）
         self.status = status    # ReAct: 状态信息
         self.function_name = function_name  # Function Query: 功能名称
         self.function_status = function_status  # Function Query: 功能状态 (tested/testing)
-        self.input_sequence = input_sequence  # 多输入序列: [(widget, input_text), ...]
+        self.input_sequence = input_sequence  # 多输入序列: [(widget, input_text, content_desc), ...]
         self.operation_widget = operation_widget  # 输入后的操作目标控件（如 Submit 按钮）
+        self.external_redirect = external_redirect  # 是否触发了外部应用跳转
+        self.redirect_package = redirect_package  # 跳转到的外部应用包名
+        self.expected_result = expected_result  # 预期结果
+        self.bug_detected = bug_detected  # 是否检测到 Bug
+        self.bug_description = bug_description  # Bug 描述 {"type": "...", "severity": "...", "description": "..."}
+        self.widget_type = widget_type  # 控件类型 (TextView, EditText, Button, etc.)
+        self.operation_widget_type = operation_widget_type  # 操作目标控件类型
+        self.widget_content_desc = widget_content_desc  # 用于区分同 resource-id 的字段（如 Front/Back）
+        self.target_x = target_x  # NEW: 目标控件中心 X 坐标（用于视觉定位）
+        self.target_y = target_y  # NEW: 目标控件中心 Y 坐标（用于视觉定位）
 
     def is_valid(self) -> bool:
         """检查是否为有效的动作"""
@@ -69,8 +97,8 @@ class ParsedAction:
         if not self.operation:
             return False
 
-        # 系统级动作（back, home, scroll_down, scroll_up）不需要 widget
-        system_actions = {"back", "home", "scroll_down", "scroll_up"}
+        # 系统级动作（back, scroll_down, scroll_up）不需要 widget
+        system_actions = {"back", "scroll_down", "scroll_up"}
         if self.operation in system_actions:
             return True
 
@@ -78,7 +106,11 @@ class ParsedAction:
         if self.operation == "scroll":
             return True
 
-        # click 类操作必须有 widget
+        # click 类操作：如果提供了视觉定位坐标 (TargetX, TargetY)，则不需要 widget
+        if self.target_x is not None and self.target_y is not None:
+            return True
+
+        # 其他 click 类操作必须有 widget
         if not self.widget:
             return False
 
@@ -88,10 +120,18 @@ class ParsedAction:
         parts = [f"operation='{self.operation}'"]
         if self.widget:
             parts.append(f"widget='{self.widget}'")
+        if self.widget_type:
+            parts.append(f"widget_type='{self.widget_type}'")
+        if self.widget_content_desc:
+            parts.append(f"content_desc='{self.widget_content_desc}'")
+        if self.target_x and self.target_y:
+            parts.append(f"target=({self.target_x},{self.target_y})")
         if self.input_text:
             parts.append(f"input='{self.input_text[:30]}...'" if len(self.input_text) > 30 else f"input='{self.input_text}'")
         if self.operation_widget:
             parts.append(f"op_widget='{self.operation_widget}'")
+        if self.operation_widget_type:
+            parts.append(f"op_widget_type='{self.operation_widget_type}'")
         if self.input_sequence:
             parts.append(f"inputs={len(self.input_sequence)}")
         if self.thought:
@@ -100,6 +140,10 @@ class ParsedAction:
             parts.append(f"function='{self.function_name}'")
             if self.function_status:
                 parts.append(f"status='{self.function_status}'")
+        if self.expected_result:
+            parts.append(f"expected='{self.expected_result[:30]}...'" if len(self.expected_result) > 30 else f"expected='{self.expected_result}'")
+        if self.bug_detected:
+            parts.append(f"BUG_DETECTED=True")
         return f"ParsedAction({', '.join(parts)})"
 
     def has_function_info(self) -> bool:
@@ -123,7 +167,6 @@ class ActionExecutor:
 
     支持全局系统级动作（System-level Navigation）：
     - back: 返回键
-    - home: Home键返回桌面
     - scroll_down: 向下滚动屏幕
     - scroll_up: 向上滚动屏幕
     """
@@ -135,17 +178,42 @@ class ActionExecutor:
         "long press", "longpress", "scroll",
         "input", "type",
         # 全局系统级动作（无需指定 Widget）
-        "back", "home", "scroll_down", "scroll_up",
+        "back", "scroll_down", "scroll_up",
     }
 
     # 系统级动作列表（不需要 Widget）
-    SYSTEM_LEVEL_ACTIONS = {"back", "home", "scroll_down", "scroll_up"}
+    SYSTEM_LEVEL_ACTIONS = {"back", "scroll_down", "scroll_up"}
 
-    def __init__(self):
-        """初始化动作执行器"""
+    def __init__(
+        self,
+        bug_analysis_engine: Optional["BugAnalysisEngine"] = None,
+        screenshot_manager: Optional["ScreenshotManager"] = None
+    ):
+        """
+        初始化动作执行器
+
+        Args:
+            bug_analysis_engine: Bug 分析引擎（可选，用于增强 Bug 检测）
+            screenshot_manager: 截图管理器（可选，用于 Bug 报告）
+        """
+        # Bug 分析引擎（多模态增强）
+        self.bug_analysis_engine = bug_analysis_engine
+        self.screenshot_manager = screenshot_manager
+
         # 最后一次崩溃检测结果（供外部查询）
         self.last_crash_detected: bool = False
         self.last_crash_log: str = ""
+
+        # 最后一次 Bug 报告（来自 BugAnalysisEngine）
+        self.last_bug_report: Optional["BugReport"] = None
+
+    def set_bug_analysis_engine(self, engine: "BugAnalysisEngine") -> None:
+        """设置 Bug 分析引擎"""
+        self.bug_analysis_engine = engine
+
+    def set_screenshot_manager(self, manager: "ScreenshotManager") -> None:
+        """设置截图管理器"""
+        self.screenshot_manager = manager
 
     def execute_action(
         self,
@@ -153,10 +221,11 @@ class ActionExecutor:
         parsed_widgets: List[Dict],
         adb_controller: ADBController,
         memory_manager: Optional["TestingSequenceMemorizer"] = None,
-        activity_name: str = "UnknownActivity"
+        activity_name: str = "UnknownActivity",
+        target_package: Optional[str] = None
     ) -> Tuple[bool, Optional[ParsedAction]]:
         """
-        执行 LLM 决策的动作，并在执行后检测崩溃
+        执行 LLM 决策的动作，并在执行后检测崩溃和外部跳转
 
         完整流程：
         1. 解析 LLM 响应，提取操作类型、目标控件名和输入文本
@@ -164,6 +233,7 @@ class ActionExecutor:
         3. 计算目标控件的中心坐标
         4. 调用 ADB 执行相应的操作
         5. 检测是否发生崩溃，如有崩溃则保存 Bug 报告
+        6. 检测是否发生外部应用跳转，如有跳转则返回目标应用
 
         Args:
             llm_response: LLM 的响应字符串
@@ -171,11 +241,14 @@ class ActionExecutor:
             adb_controller: ADB 控制器实例
             memory_manager: 记忆管理器实例，用于生成复现路径
             activity_name: 当前 Activity 名称，用于 Bug 报告
+            target_package: 目标应用的包名，用于检测外部跳转
 
         Returns:
             元组 (success, action):
             - success: True 表示执行成功，False 表示执行失败
             - action: 解析后的 ParsedAction 对象，解析失败时为 None
+              - action.external_redirect: True 表示触发了外部应用跳转
+              - action.redirect_package: 跳转到的外部应用包名
 
         注意：崩溃检测结果存储在 self.last_crash_detected 和 self.last_crash_log 中
         """
@@ -205,20 +278,8 @@ class ActionExecutor:
 
             # 执行后检测崩溃
             self._check_crash_after_action(
-                adb_controller, memory_manager, activity_name, action
-            )
-
-            return success, action
-
-        # 处理 home 操作（返回桌面）
-        if action.operation == "home":
-            print("[系统动作] 按下 Home 键返回桌面")
-            success = adb_controller.go_home()
-            time.sleep(1)  # 等待返回桌面
-
-            # 执行后检测崩溃
-            self._check_crash_after_action(
-                adb_controller, memory_manager, activity_name, action
+                adb_controller, memory_manager, activity_name, action,
+                widgets=parsed_widgets, target_package=target_package
             )
 
             return success, action
@@ -231,7 +292,8 @@ class ActionExecutor:
 
             # 执行后检测崩溃
             self._check_crash_after_action(
-                adb_controller, memory_manager, activity_name, action
+                adb_controller, memory_manager, activity_name, action,
+                widgets=parsed_widgets, target_package=target_package
             )
 
             return success, action
@@ -244,7 +306,8 @@ class ActionExecutor:
 
             # 执行后检测崩溃
             self._check_crash_after_action(
-                adb_controller, memory_manager, activity_name, action
+                adb_controller, memory_manager, activity_name, action,
+                widgets=parsed_widgets, target_package=target_package
             )
 
             return success, action
@@ -257,8 +320,12 @@ class ActionExecutor:
 
             # 执行后检测崩溃
             self._check_crash_after_action(
-                adb_controller, memory_manager, activity_name, action
+                adb_controller, memory_manager, activity_name, action,
+                widgets=parsed_widgets, target_package=target_package
             )
+
+            # 检测外部跳转
+            self._check_external_redirect(adb_controller, target_package, action)
 
             return success, action
 
@@ -269,8 +336,12 @@ class ActionExecutor:
 
             # 执行后检测崩溃
             self._check_crash_after_action(
-                adb_controller, memory_manager, activity_name, action
+                adb_controller, memory_manager, activity_name, action,
+                widgets=parsed_widgets, target_package=target_package
             )
+
+            # 检测外部跳转
+            self._check_external_redirect(adb_controller, target_package, action)
 
             return success, action
 
@@ -280,8 +351,12 @@ class ActionExecutor:
 
             # 执行后检测崩溃
             self._check_crash_after_action(
-                adb_controller, memory_manager, activity_name, action
+                adb_controller, memory_manager, activity_name, action,
+                widgets=parsed_widgets, target_package=target_package
             )
+
+            # 检测外部跳转
+            self._check_external_redirect(adb_controller, target_package, action)
 
             return success, action
 
@@ -298,13 +373,55 @@ class ActionExecutor:
 
             # 执行后检测崩溃
             self._check_crash_after_action(
-                adb_controller, memory_manager, activity_name, action
+                adb_controller, memory_manager, activity_name, action,
+                widgets=parsed_widgets, target_package=target_package
             )
 
             return success, action
 
+        # ========== NEW: 视觉定位坐标直接点击（无 widget 名称时）==========
+        # 如果提供了 TargetX/TargetY 但没有 widget 名称，直接使用坐标点击
+        if action.target_x is not None and action.target_y is not None and not action.widget:
+            print(f"[视觉定位] 直接使用坐标点击: ({action.target_x}, {action.target_y})")
+
+            # 在控件列表中查找最接近该坐标的控件（用于日志记录）
+            closest_widget = None
+            min_distance = float('inf')
+            for widget in parsed_widgets:
+                cx, cy = self._calculate_center(widget)
+                if cx is not None and cy is not None:
+                    distance = abs(cx - action.target_x) + abs(cy - action.target_y)
+                    if distance < min_distance:
+                        min_distance = distance
+                        closest_widget = widget
+
+            if closest_widget:
+                rid = closest_widget.get("resource_id", "")
+                print(f"[视觉定位] 最近控件: {rid}, 距离: {min_distance}px")
+
+            # 执行点击
+            success = self._perform_operation(
+                action.operation, action.target_x, action.target_y, adb_controller
+            )
+
+            # 执行后检测崩溃
+            self._check_crash_after_action(
+                adb_controller, memory_manager, activity_name, action,
+                widgets=parsed_widgets, target_package=target_package
+            )
+
+            # 检测外部跳转
+            self._check_external_redirect(adb_controller, target_package, action)
+
+            return success, action
+
         # 步骤2：查找匹配的控件
-        target_widget = self._find_target_widget(action.widget, parsed_widgets)
+        target_widget = self._find_target_widget(
+            action.widget, parsed_widgets,
+            widget_type=action.widget_type,
+            target_x=action.target_x,  # NEW: 视觉定位坐标
+            target_y=action.target_y   # NEW: 视觉定位坐标
+        )
         if not target_widget:
             print(f"[执行失败] 未找到名为 '{action.widget}' 的控件")
             return False, action
@@ -327,24 +444,77 @@ class ActionExecutor:
 
         # 执行后检测崩溃
         self._check_crash_after_action(
-            adb_controller, memory_manager, activity_name, action
+            adb_controller, memory_manager, activity_name, action,
+            widgets=parsed_widgets, target_package=target_package
         )
 
+        # 检测外部跳转
+        self._check_external_redirect(adb_controller, target_package, action)
+
         return success, action
+
+    def _check_external_redirect(
+        self,
+        adb_controller: ADBController,
+        target_package: Optional[str],
+        action: ParsedAction
+    ) -> None:
+        """
+        检测并处理外部应用跳转
+
+        当操作触发了外部应用跳转时：
+        1. 标记 action.external_redirect = True
+        2. 记录跳转到的包名 action.redirect_package
+        3. 按 back 返回目标应用
+
+        Args:
+            adb_controller: ADB 控制器实例
+            target_package: 目标应用包名
+            action: 当前执行的动作对象
+        """
+        if not target_package:
+            return
+
+        # 获取当前焦点应用包名
+        current_package = adb_controller.get_current_package()
+
+        if current_package != target_package:
+            print(f"\n[外部跳转检测] 检测到应用跳转!")
+            print(f"  - 目标应用: {target_package}")
+            print(f"  - 跳转到: {current_package}")
+
+            # 标记跳转信息
+            action.external_redirect = True
+            action.redirect_package = current_package
+
+            # 按 back 返回目标应用
+            print(f"[外部跳转处理] 按下 back 键返回目标应用...")
+            adb_controller.go_back()
+            time.sleep(1)
+
+            # 验证是否返回成功
+            new_package = adb_controller.get_current_package()
+            if new_package == target_package:
+                print(f"[外部跳转处理] 成功返回目标应用: {target_package}")
+            else:
+                print(f"[外部跳转处理] 警告: 当前包名 {new_package}，可能需要再次按 back")
 
     def _check_crash_after_action(
         self,
         adb_controller: ADBController,
         memory_manager: Optional["TestingSequenceMemorizer"],
         activity_name: str,
-        action: ParsedAction
+        action: ParsedAction,
+        widgets: Optional[List[Dict]] = None,
+        target_package: Optional[str] = None
     ) -> None:
         """
         在执行动作后检测崩溃，并保存 Bug 报告
 
-        工业级崩溃检测流程：
-        1. 等待 2 秒，确保崩溃日志已写入系统缓冲区
-        2. 调用 ADB 检测崩溃（精准关键字 + 日志切片）
+        智能崩溃检测流程（优化版）：
+        1. 快速检查（0.5秒后）- 大多数崩溃会立即发生
+        2. 异步轮询检测（最长 2 秒，发现崩溃立即返回）
+        3. 如果配置了 BugAnalysisEngine，使用多模态分析增强
 
         注意：logcat 缓存清空应在动作执行前完成（由调用方负责）
 
@@ -355,17 +525,40 @@ class ActionExecutor:
             memory_manager: 记忆管理器实例
             activity_name: 当前 Activity 名称
             action: 刚执行的动作
+            widgets: 当前控件列表（用于逻辑错误检测）
+            target_package: 被测应用包名，用于过滤误报
         """
-        print("\n[Bug Oracle] 正在检测崩溃...")
+        print("\n[Bug Oracle] 正在检测 Bug...")
 
-        # 工业级标准：等待 2 秒，确保崩溃日志已写入系统缓冲区
-        print("[Bug Oracle] 等待 2 秒确保崩溃日志已写入...")
-        time.sleep(2)
+        # 重置 Bug 报告
+        self.last_bug_report = None
 
-        # 检测崩溃（使用精准关键字和日志切片）
-        crash_log = adb_controller.check_for_crash()
+        # ========== 智能崩溃检测（优化：异步轮询）==========
+        # 策略：先快速检查，然后轮询，最长等待 2 秒
+        # 大多数崩溃会在 0.5 秒内发生，优化后平均检测时间从 2 秒降至 0.5-1 秒
 
-        if crash_log:
+        max_wait_time = 2.0  # 最长等待时间
+        check_interval = 0.25  # 检查间隔
+        elapsed = 0.0
+        crash_detected = False
+
+        print("[Bug Oracle] 智能检测中（最长 2 秒，发现崩溃立即返回）...")
+
+        while elapsed < max_wait_time:
+            # 快速检查崩溃（带包名过滤）
+            crash_log = adb_controller.check_for_crash(target_package=target_package)
+
+            if crash_log:
+                crash_detected = True
+                print(f"[Bug Oracle] 检测到崩溃！（耗时: {elapsed:.2f}秒）")
+                break
+
+            # 未检测到崩溃，继续等待
+            time.sleep(check_interval)
+            elapsed += check_interval
+
+        # ========== 处理检测结果 ==========
+        if crash_detected:
             print("=" * 60)
             print("🚨 [崩溃检测] 发现应用崩溃！")
             print("=" * 60)
@@ -373,6 +566,35 @@ class ActionExecutor:
             # 更新崩溃状态
             self.last_crash_detected = True
             self.last_crash_log = crash_log
+
+            # 使用 BugAnalysisEngine 增强分析（如果可用）
+            if self.bug_analysis_engine:
+                try:
+                    self.bug_analysis_engine.set_adb_controller(adb_controller)
+                    if self.screenshot_manager:
+                        self.bug_analysis_engine.set_screenshot_manager(self.screenshot_manager)
+
+                    # 获取操作历史
+                    operation_history = []
+                    if memory_manager:
+                        operation_history = list(memory_manager.operation_history)
+
+                    bug_report = self.bug_analysis_engine.create_crash_report(
+                        activity_name=activity_name,
+                        operation=action.operation or "unknown",
+                        widget=action.widget or "",
+                        operation_history=operation_history,
+                        target_package=target_package
+                    )
+
+                    if bug_report:
+                        print(f"   严重程度: {bug_report.severity.value}")
+                        print(f"   描述: {bug_report.title}")
+                        self.last_bug_report = bug_report
+                        return
+
+                except Exception as e:
+                    print(f"[BugAnalysisEngine] 分析失败: {e}")
 
             # 保存 Bug 报告
             self._save_bug_report(
@@ -384,7 +606,7 @@ class ActionExecutor:
         else:
             self.last_crash_detected = False
             self.last_crash_log = ""
-            print("[Bug Oracle] 未检测到崩溃，继续测试...")
+            print(f"[Bug Oracle] 未检测到 Bug，继续测试...（检测耗时: {elapsed:.2f}秒）")
 
     def _save_bug_report(
         self,
@@ -490,6 +712,23 @@ class ActionExecutor:
         print("[JSON解析失败] 回退到正则表达式解析...")
         return self._parse_regex_response(llm_response)
 
+    def parse_action_only(self, llm_response: str) -> Optional[ParsedAction]:
+        """
+        仅解析 LLM 响应，不执行动作
+
+        用于在执行动作之前检查 Bug 断言，确保监管者审查使用正确的上下文快照。
+
+        Args:
+            llm_response: LLM 响应字符串
+
+        Returns:
+            ParsedAction 对象，解析失败时为 None
+        """
+        action = self._parse_llm_response(llm_response)
+        if action and action.is_valid():
+            return action
+        return None
+
     def _parse_json_response(self, llm_response: str) -> Optional[ParsedAction]:
         """
         解析 ReAct JSON 格式的 LLM 响应
@@ -542,6 +781,12 @@ class ActionExecutor:
             # 提取 Thought
             action.thought = data.get('Thought') or data.get('thought') or data.get('reasoning')
 
+            # ========== NEW: 提取 Page_Description ==========
+            page_description = data.get('Page_Description') or data.get('page_description')
+            if page_description and str(page_description).lower() not in ('null', 'none', ''):
+                action.page_description = str(page_description).strip()
+                print(f"[JSON解析] Page_Description: {action.page_description[:80]}...")
+
             # ========== 提取 Function 信息 ==========
             function_name = data.get('Function') or data.get('function')
             if function_name and str(function_name).lower() not in ('null', 'none', ''):
@@ -576,25 +821,37 @@ class ActionExecutor:
             if widget_val and str(widget_val).lower() not in ('null', 'none', ''):
                 action.widget = str(widget_val).strip()
 
+            # ========== 提取 WidgetType ==========
+            # 控件类型：TextView, EditText, Button, ImageView 等
+            widget_type_val = data.get('WidgetType') or data.get('widget_type')
+            if widget_type_val and str(widget_type_val).lower() not in ('null', 'none', ''):
+                action.widget_type = str(widget_type_val).strip()
+
             # ========== 提取 Input ==========
             # 新格式: Inputs 数组 (多输入支持)
             # 旧格式: Input 字段 (单输入)
             # 更旧格式: Input_Content 字段
             inputs_array = data.get('Inputs') or data.get('inputs')
             if inputs_array and isinstance(inputs_array, list):
-                # 处理多输入数组格式
+                # 处理多输入数组格式（支持 ContentDesc 字段）
                 input_sequence = []
                 for item in inputs_array:
                     if isinstance(item, dict):
                         widget_name = item.get('Widget') or item.get('widget')
                         input_text = item.get('Input') or item.get('input')
+                        # 新增：提取 ContentDesc 用于区分同 resource-id 的字段
+                        content_desc = item.get('ContentDesc') or item.get('content_desc')
                         if widget_name and input_text:
-                            input_sequence.append((str(widget_name).strip(), str(input_text).strip()))
+                            # 三元组：(widget_name, input_text, content_desc)
+                            input_sequence.append((str(widget_name).strip(), str(input_text).strip(), content_desc))
                 if input_sequence:
                     action.input_sequence = input_sequence
                     # 设置第一个输入作为主 widget 和 input_text（向后兼容）
                     action.widget = input_sequence[0][0]
                     action.input_text = input_sequence[0][1]
+                    # 新增：设置第一个输入的 content_desc
+                    if input_sequence[0][2]:
+                        action.widget_content_desc = str(input_sequence[0][2]).strip()
                     print(f"[JSON解析] 多输入序列: {input_sequence}")
             else:
                 # 单输入格式
@@ -609,6 +866,41 @@ class ActionExecutor:
             if operation_widget and str(operation_widget).lower() not in ('null', 'none', ''):
                 action.operation_widget = str(operation_widget).strip()
 
+            # ========== 提取 OperationWidgetType ==========
+            # 操作目标控件类型
+            operation_widget_type = data.get('OperationWidgetType') or data.get('operation_widget_type')
+            if operation_widget_type and str(operation_widget_type).lower() not in ('null', 'none', ''):
+                action.operation_widget_type = str(operation_widget_type).strip()
+
+            # ========== 提取 Expected_Result ==========
+            expected_result = data.get('Expected_Result') or data.get('expected_result')
+            if expected_result and str(expected_result).lower() not in ('null', 'none', ''):
+                action.expected_result = str(expected_result).strip()
+                print(f"[JSON解析] Expected_Result: {action.expected_result[:50]}...")
+
+            # ========== 提取 Bug_Detected 和 Bug_Description ==========
+            bug_detected = data.get('Bug_Detected') or data.get('bug_detected')
+            if bug_detected:
+                action.bug_detected = bool(bug_detected)
+                if action.bug_detected:
+                    bug_desc = data.get('Bug_Description') or data.get('bug_description')
+                    if bug_desc and isinstance(bug_desc, dict):
+                        action.bug_description = bug_desc
+                        print(f"[JSON解析] Bug检测: type={bug_desc.get('type')}, severity={bug_desc.get('severity')}")
+                    elif bug_desc:
+                        action.bug_description = {"description": str(bug_desc)}
+
+            # ========== NEW: 提取 TargetX 和 TargetY (视觉定位坐标) ==========
+            target_x = data.get('TargetX') or data.get('target_x') or data.get('targetx')
+            target_y = data.get('TargetY') or data.get('target_y') or data.get('targety')
+            if target_x is not None and target_y is not None:
+                try:
+                    action.target_x = int(target_x)
+                    action.target_y = int(target_y)
+                    print(f"[JSON解析] 视觉定位坐标: TargetX={action.target_x}, TargetY={action.target_y}")
+                except (ValueError, TypeError) as e:
+                    print(f"[JSON解析警告] TargetX/TargetY 转换失败: {e}")
+
             # ========== 后处理 ==========
             # 如果有 Input 但没有 Operation，默认为 input 操作
             if action.input_text and not action.operation:
@@ -616,9 +908,9 @@ class ActionExecutor:
 
             # 打印解析结果
             print(f"[JSON解析] Thought: {action.thought[:50] if action.thought else 'N/A'}...")
-            print(f"[JSON解析] Operation: {action.operation}, Widget: {action.widget}, Input: {action.input_text}")
+            print(f"[JSON解析] Operation: {action.operation}, Widget: {action.widget}, WidgetType: {action.widget_type}, Input: {action.input_text}")
             if action.operation_widget:
-                print(f"[JSON解析] OperationWidget: {action.operation_widget}")
+                print(f"[JSON解析] OperationWidget: {action.operation_widget}, OperationWidgetType: {action.operation_widget_type}")
             if action.function_name:
                 print(f"[JSON解析] Function: {action.function_name} ({action.function_status})")
 
@@ -742,7 +1034,7 @@ class ActionExecutor:
                         else:
                             break
                     if closest_widget:
-                        input_sequence.append((closest_widget, input_val))
+                        input_sequence.append((closest_widget, input_val, None))  # 三元组，content_desc 为 None
 
                 if input_sequence:
                     action.input_sequence = input_sequence
@@ -960,6 +1252,8 @@ class ActionExecutor:
         """
         执行多输入操作：依次点击每个输入框并输入文本
 
+        支持三元组 (widget_name, input_text, content_desc)，用于区分同名控件
+
         Args:
             action: 解析后的动作，包含 input_sequence
             parsed_widgets: 控件列表
@@ -970,11 +1264,25 @@ class ActionExecutor:
         """
         print(f"[多输入操作] 共 {len(action.input_sequence)} 个输入")
 
-        for i, (widget_name, input_text) in enumerate(action.input_sequence, 1):
-            print(f"\n[输入 {i}/{len(action.input_sequence)}] 控件: {widget_name}, 文本: {input_text}")
+        for i, input_item in enumerate(action.input_sequence, 1):
+            # 支持三元组 (widget_name, input_text, content_desc) 或二元组 (widget_name, input_text)
+            if len(input_item) == 3:
+                widget_name, input_text, content_desc = input_item
+            else:
+                widget_name, input_text = input_item
+                content_desc = None
 
-            # 查找输入框控件
-            target_widget = self._find_target_widget(widget_name, parsed_widgets)
+            print(f"\n[输入 {i}/{len(action.input_sequence)}] 控件: {widget_name}, 文本: {input_text}")
+            if content_desc:
+                print(f"  [ContentDesc 提示] '{content_desc}'")
+
+            # 查找输入框控件（传递 content_desc_hint）
+            target_widget = self._find_target_widget(
+                widget_name,
+                parsed_widgets,
+                widget_type="EditText",
+                content_desc_hint=content_desc
+            )
             if not target_widget:
                 print(f"[执行失败] 未找到输入框: {widget_name}")
                 return False
@@ -996,9 +1304,15 @@ class ActionExecutor:
 
             # 使用 UIAutomator2 清除旧文本并输入新文本
             print(f"[清除+输入] 使用 UIAutomator2 处理输入框 {widget_name}")
+            # 将坐标信息传递给 clear_and_input_text
+            target_widget["center_x"] = center_x
+            target_widget["center_y"] = center_y
             if not adb_controller.clear_and_input_text(target_widget, input_text):
                 print(f"[执行失败] 文本输入失败: {input_text}")
                 return False
+
+            # 收起键盘
+            adb_controller.hide_keyboard()
 
             # 短暂等待
             time.sleep(0.3)
@@ -1015,8 +1329,10 @@ class ActionExecutor:
         """
         执行输入+操作组合：先输入文本，然后执行操作（如点击 Submit）
 
+        支持通过 widget_content_desc 区分同 resource-id 的多个输入框
+
         JSON 格式示例:
-        {"Widget": "InputField", "Input": "text", "Operation": "click", "OperationWidget": "Submit"}
+        {"Widget": "InputField", "ContentDesc": "Back", "Input": "text", "Operation": "click", "OperationWidget": "Submit"}
 
         Args:
             action: 解析后的动作，包含 widget, input_text, operation, operation_widget
@@ -1027,11 +1343,18 @@ class ActionExecutor:
             是否执行成功
         """
         print(f"[输入+操作] 输入框: {action.widget}, 文本: {action.input_text}")
+        if action.widget_content_desc:
+            print(f"  [ContentDesc 提示] '{action.widget_content_desc}'")
         print(f"[输入+操作] 后续操作: {action.operation} -> {action.operation_widget}")
 
         # 步骤1：输入文本
-        # 查找输入框控件
-        input_widget = self._find_target_widget(action.widget, parsed_widgets)
+        # 查找输入框控件（传递 content_desc_hint）
+        input_widget = self._find_target_widget(
+            action.widget,
+            parsed_widgets,
+            widget_type=action.widget_type,
+            content_desc_hint=action.widget_content_desc
+        )
         if not input_widget:
             print(f"[执行失败] 未找到输入框: {action.widget}")
             return False
@@ -1053,9 +1376,15 @@ class ActionExecutor:
 
         # 步骤2：使用 UIAutomator2 清除旧文本并输入新文本
         print(f"[步骤2] 使用 UIAutomator2 清除旧文本并输入: {action.input_text}")
+        # 将坐标信息传递给 clear_and_input_text
+        input_widget["center_x"] = input_x
+        input_widget["center_y"] = input_y
         if not adb_controller.clear_and_input_text(input_widget, action.input_text):
             print("[执行失败] 文本输入失败")
             return False
+
+        # 收起键盘（输入完成后收起，避免遮挡后续操作）
+        adb_controller.hide_keyboard()
 
         # 短暂等待
         time.sleep(0.3)
@@ -1064,7 +1393,7 @@ class ActionExecutor:
         print(f"[步骤3] 执行操作: {action.operation} -> {action.operation_widget}")
 
         # 查找操作目标控件
-        target_widget = self._find_target_widget(action.operation_widget, parsed_widgets)
+        target_widget = self._find_target_widget(action.operation_widget, parsed_widgets, widget_type=action.operation_widget_type)
         if not target_widget:
             print(f"[执行失败] 未找到操作目标控件: {action.operation_widget}")
             return False
@@ -1092,6 +1421,8 @@ class ActionExecutor:
         """
         执行输入操作：先定位并点击输入框获取焦点，等待 1 秒后输入文本
 
+        支持通过 widget_content_desc 区分同 resource-id 的多个输入框
+
         Args:
             action: 解析后的动作
             parsed_widgets: 控件列表
@@ -1101,9 +1432,16 @@ class ActionExecutor:
             是否执行成功
         """
         print(f"[输入操作] 目标控件: {action.widget}, 输入文本: {action.input_text}")
+        if action.widget_content_desc:
+            print(f"  [ContentDesc 提示] '{action.widget_content_desc}'")
 
-        # 查找输入框控件
-        target_widget = self._find_target_widget(action.widget, parsed_widgets)
+        # 查找输入框控件（传递 content_desc_hint）
+        target_widget = self._find_target_widget(
+            action.widget,
+            parsed_widgets,
+            widget_type=action.widget_type,
+            content_desc_hint=action.widget_content_desc
+        )
         if not target_widget:
             print(f"[执行失败] 未找到输入框: {action.widget}")
             return False
@@ -1126,9 +1464,15 @@ class ActionExecutor:
 
         # 步骤3：使用 UIAutomator2 清除旧文本并输入新文本
         print("[步骤3] 使用 UIAutomator2 清除旧文本并输入新文本...")
+        # 将坐标信息传递给 clear_and_input_text
+        target_widget["center_x"] = center_x
+        target_widget["center_y"] = center_y
         if not adb_controller.clear_and_input_text(target_widget, action.input_text):
             print("[执行失败] 文本输入失败")
             return False
+
+        # 收起键盘
+        adb_controller.hide_keyboard()
 
         print("[输入成功] 文本已输入完成")
         return True
@@ -1210,27 +1554,72 @@ class ActionExecutor:
     def _find_target_widget(
         self,
         widget_name: str,
-        parsed_widgets: List[Dict]
+        parsed_widgets: List[Dict],
+        widget_type: Optional[str] = None,
+        content_desc_hint: Optional[str] = None,  # 新增参数：用于区分同 resource-id 的字段
+        target_x: Optional[int] = None,  # NEW: 目标中心 X 坐标（视觉定位）
+        target_y: Optional[int] = None   # NEW: 目标中心 Y 坐标（视觉定位）
     ) -> Optional[Dict]:
         """
         在控件列表中查找名称匹配的控件
 
-        匹配策略：
+        匹配策略（按优先级排序）：
+        0B. 如果提供了 target_x/target_y，通过坐标距离匹配（最高优先级 - 视觉定位）
+        0. 如果提供了 widget_type，通过 text + class 组合精确匹配
         1. 精确匹配 text 字段
-        2. 精确匹配 resource-id 的最后一部分
-        3. 部分匹配 text 或 resource-id（模糊匹配）
-        4. 匹配 content-desc
+        2A. resource-id + content_desc 组合匹配（用于区分同 resource-id 的字段）
+        2. 精确匹配 resource-id 的最后一部分（如有多个匹配，会发出警告）
+        3. 纯匹配 content-desc
+        4. 模糊匹配（包含关系）
+        5. 语义关键词匹配
 
-        终极清洗：移除所有空白字符（空格、换行、制表符）后再匹配
+        终极清洗：移除所有空白字符后再匹配
 
         Args:
             widget_name: 目标控件名称
             parsed_widgets: 控件列表
+            widget_type: 控件类型（TextView, EditText, Button 等）
+            content_desc_hint: content_desc 提示（用于区分同 resource-id 的字段）
+            target_x: 目标中心 X 坐标（视觉定位）
+            target_y: 目标中心 Y 坐标（视觉定位）
 
         Returns:
             找到的控件字典，未找到返回 None
         """
-        if not widget_name or not parsed_widgets:
+        if not parsed_widgets:
+            return None
+
+        # ========== 策略0B：坐标匹配（NEW - 最高优先级 - 视觉定位）==========
+        if target_x is not None and target_y is not None:
+            print(f"[匹配策略0B] 使用 LLM 提供的视觉定位坐标: ({target_x}, {target_y})")
+
+            closest_widget = None
+            min_distance = float('inf')
+            tolerance = 100  # 容差 100px
+
+            for widget in parsed_widgets:
+                cx, cy = self._calculate_center(widget)
+                if cx is not None and cy is not None:
+                    distance = abs(cx - target_x) + abs(cy - target_y)
+                    widget_name_temp = widget.get("text", "") or widget.get("resource_id", "")
+                    if "/" in widget_name_temp:
+                        widget_name_temp = widget_name_temp.split("/")[-1]
+                    print(f"  [距离计算] '{widget_name_temp}' center=({cx},{cy}), distance={distance}px")
+
+                    if distance < min_distance and distance < tolerance:
+                        min_distance = distance
+                        closest_widget = widget
+
+            if closest_widget:
+                closest_name = closest_widget.get("text", "") or closest_widget.get("resource_id", "")
+                if "/" in closest_name:
+                    closest_name = closest_name.split("/")[-1]
+                print(f"[匹配成功] 通过视觉定位坐标找到最近控件: '{closest_name}', distance={min_distance}px")
+                return closest_widget
+            else:
+                print(f"[匹配警告] 视觉定位坐标 ({target_x}, {target_y}) 未找到容差范围内的控件，继续使用名称匹配...")
+
+        if not widget_name:
             return None
 
         # ========== 终极字符串清洗辅助函数 ==========
@@ -1244,18 +1633,41 @@ class ActionExecutor:
         widget_name_lower = widget_name.lower().strip('"\'')
         print(f"[匹配调试] 目标控件名: '{widget_name}' (clean: '{widget_name_clean}')")
         print(f"[匹配调试] 控件列表数量: {len(parsed_widgets)}")
+        if widget_type:
+            print(f"[匹配调试] 目标控件类型: '{widget_type}'")
 
-        # 打印所有控件的标识信息（用于调试）
+        # 打印所有控件的标识信息（用于调试）- 显示所有控件
         print("[匹配调试] 控件列表详情:")
-        for i, w in enumerate(parsed_widgets[:10]):  # 只打印前10个
+        for i, w in enumerate(parsed_widgets):
             text = w.get("text", "")
-            original_text = w.get("original_text", "")
             rid = w.get("resource_id", "")
             cd = w.get("content_desc", "")
             cls = w.get("class", "")
+            # 提取简单类名
+            simple_class = cls.split(".")[-1] if cls else ""
             # 显示清洗前后对比
             text_clean = clean_text(text)
-            print(f"  [{i}] text='{text}' (clean: '{text_clean}'), id='{rid}', content_desc='{cd}'")
+            print(f"  [{i}] text='{text}' (clean: '{text_clean}'), class='{simple_class}', id='{rid}', content_desc='{cd}'")
+
+        # ========== 策略0：text + class 组合精确匹配（最高优先级）==========
+        if widget_type:
+            print(f"[匹配策略0] 尝试 text + class 组合匹配...")
+            for widget in parsed_widgets:
+                text = widget.get("text", "")
+                class_name = widget.get("class", "")
+
+                # 提取简单类名
+                simple_class = class_name.split(".")[-1] if class_name else ""
+
+                # 清洗后匹配 text
+                text_clean = clean_text(text)
+                if text_clean == widget_name_clean:
+                    # 检查 class 是否匹配
+                    if widget_type.lower() in simple_class.lower():
+                        print(f"[匹配成功] 通过 text+class 组合精确匹配: text='{text}', class='{simple_class}' (target: {widget_type})")
+                        return widget
+                    else:
+                        print(f"  [跳过] text 匹配但 class 不匹配: text='{text}', class='{simple_class}' (target: {widget_type})")
 
         # 策略1：精确匹配 text（包括 original_text）
         for widget in parsed_widgets:
@@ -1270,15 +1682,57 @@ class ActionExecutor:
                         print(f"[匹配成功] 通过 text 清洗后精确匹配: '{txt}' -> '{txt_clean}'")
                         return widget
 
-        # 策略2：精确匹配 resource-id 最后一部分
+        # ========== 策略2A：resource-id + content_desc 组合匹配（新增）==========
+        # 用于区分同 resource-id 的多个控件（如 AnkiDroid 中的 Front/Back 字段）
+        if content_desc_hint:
+            print(f"[匹配策略2A] 尝试 resource-id + content_desc 组合匹配，hint='{content_desc_hint}'...")
+            for widget in parsed_widgets:
+                resource_id = widget.get("resource_id", "")
+                widget_cd = widget.get("content_desc", "")
+
+                if resource_id:
+                    id_name = resource_id.split("/")[-1] if "/" in resource_id else resource_id
+                    id_clean = clean_text(id_name)
+
+                    if id_clean == widget_name_clean:
+                        # 匹配 content_desc
+                        cd_clean = clean_text(widget_cd)
+                        hint_clean = clean_text(content_desc_hint)
+
+                        if cd_clean == hint_clean or hint_clean in cd_clean:
+                            print(f"[匹配成功] resource-id + content_desc 组合匹配: id='{id_name}', cd='{widget_cd}'")
+                            return widget
+                        else:
+                            print(f"  [跳过] resource-id 匹配但 content_desc 不匹配: id='{id_name}', cd='{widget_cd}' (期望: '{content_desc_hint}')")
+
+        # ========== 策略2：精确匹配 resource-id 最后一部分（改进：警告多匹配）==========
+        matching_widgets = []
         for widget in parsed_widgets:
             resource_id = widget.get("resource_id", "")
             if resource_id:
                 id_name = resource_id.split("/")[-1] if "/" in resource_id else resource_id
                 id_clean = clean_text(id_name)
                 if id_clean == widget_name_clean:
-                    print(f"[匹配成功] 通过 resource-id 精确匹配: {id_name}")
-                    return widget
+                    matching_widgets.append(widget)
+
+        if len(matching_widgets) == 1:
+            widget = matching_widgets[0]
+            rid = widget.get("resource_id", "")
+            cd = widget.get("content_desc", "")
+            print(f"[匹配成功] 通过 resource-id 精确匹配: '{rid.split('/')[-1]}' (content_desc='{cd}')")
+            return widget
+
+        # 如果有多个匹配的控件，发出警告并返回第一个（建议使用 content_desc）
+        if len(matching_widgets) > 1:
+            print(f"[匹配警告] 发现 {len(matching_widgets)} 个同名控件 resource-id='{widget_name}'：")
+            for i, w in enumerate(matching_widgets):
+                cd = w.get("content_desc", "")
+                text = w.get("text", "")
+                print(f"  [{i}] content_desc='{cd}', text='{text[:30] if text else ''}'")
+            print(f"[匹配建议] 请在 JSON 中使用 ContentDesc 字段指定目标控件（如 'Front' 或 'Back'）")
+            # 返回第一个（默认行为，但可能不准确）
+            print(f"[匹配结果] 返回第一个同名控件（可能不准确）")
+            return matching_widgets[0]
 
         # 策略3：精确匹配 content-desc
         for widget in parsed_widgets:
@@ -1315,7 +1769,117 @@ class ActionExecutor:
                     print(f"[匹配成功] 通过 resource-id 模糊匹配: {id_name}")
                     return widget
 
+        # 策略5：语义关键词匹配（处理 LLM 返回语义描述的情况）
+        semantic_match = self._semantic_keyword_match(widget_name, widget_name_clean, parsed_widgets, widget_type)
+        if semantic_match:
+            return semantic_match
+
         print(f"[匹配失败] 未找到匹配控件: '{widget_name}' (clean: '{widget_name_clean}')")
+        return None
+
+    def _semantic_keyword_match(
+        self,
+        widget_name: str,
+        widget_name_clean: str,
+        parsed_widgets: List[Dict],
+        widget_type: Optional[str] = None
+    ) -> Optional[Dict]:
+        """
+        语义关键词匹配
+
+        处理 LLM 返回语义描述的情况，例如：
+        - "用户名输入框" -> 匹配 resource_id="username" 或 text="请输入用户名"
+        - "登录按钮" -> 匹配 resource_id="login" 或 text="登录"
+        - "密码" -> 匹配 resource_id="password"
+
+        Args:
+            widget_name: 原始控件名称
+            widget_name_clean: 清洗后的控件名称
+            parsed_widgets: 控件列表
+            widget_type: 控件类型
+
+        Returns:
+            匹配到的控件，未找到返回 None
+        """
+        # 计算小写版本
+        widget_name_lower = widget_name.lower().strip('"\'')
+
+        # 语义关键词映射表
+        SEMANTIC_KEYWORDS = {
+            # 登录相关
+            "登录": ["login", "signin", "log_in", "sign_in"],
+            "注册": ["register", "signup", "sign_up", "create"],
+            "提交": ["submit", "confirm", "ok", "done"],
+            "取消": ["cancel", "close", "dismiss"],
+
+            # 用户相关
+            "用户名": ["username", "user", "account", "loginname", "name"],
+            "密码": ["password", "pwd", "pass"],
+            "邮箱": ["email", "mail"],
+            "手机": ["phone", "mobile", "tel"],
+            "验证码": ["code", "captcha", "verify"],
+
+            # 操作相关
+            "搜索": ["search", "find", "query"],
+            "发送": ["send", "submit", "post"],
+            "保存": ["save", "store"],
+            "删除": ["delete", "remove", "clear"],
+            "编辑": ["edit", "modify", "change"],
+            "设置": ["setting", "config", "preference"],
+
+            # 导航相关
+            "返回": ["back", "return", "prev"],
+            "下一步": ["next", "forward", "continue"],
+            "完成": ["finish", "done", "complete"],
+
+            # 英文关键词
+            "username": ["username", "user", "account", "loginname", "用户名"],
+            "password": ["password", "pwd", "密码"],
+            "login": ["login", "signin", "登录"],
+            "submit": ["submit", "confirm", "提交", "确定"],
+            "cancel": ["cancel", "取消"],
+            "search": ["search", "搜索", "查找"],
+        }
+
+        # 扩展关键词：提取 widget_name 中的关键词
+        expanded_keywords = []
+        for key, synonyms in SEMANTIC_KEYWORDS.items():
+            if key in widget_name_lower or key in widget_name_clean:
+                expanded_keywords.extend(synonyms)
+
+        if not expanded_keywords:
+            return None
+
+        print(f"[语义匹配] 扩展关键词: {expanded_keywords}")
+
+        # 在控件中搜索匹配
+        for widget in parsed_widgets:
+            text = widget.get("text", "").lower()
+            original_text = widget.get("original_text", "").lower()
+            resource_id = widget.get("resource_id", "").lower()
+            content_desc = widget.get("content_desc", "").lower()
+            class_name = widget.get("class", "")
+
+            # 提取 resource-id 的最后一部分
+            id_name = resource_id.split("/")[-1] if "/" in resource_id else resource_id
+
+            # 收集所有文本
+            all_texts = [text, original_text, content_desc, id_name]
+
+            # 检查是否匹配任何扩展关键词
+            for keyword in expanded_keywords:
+                keyword_clean = re.sub(r'\s+', '', keyword.lower())
+                for txt in all_texts:
+                    txt_clean = re.sub(r'\s+', '', txt)
+                    if keyword_clean in txt_clean:
+                        # 如果指定了 widget_type，检查 class 是否匹配
+                        if widget_type:
+                            simple_class = class_name.split(".")[-1] if class_name else ""
+                            if widget_type.lower() not in simple_class.lower():
+                                continue
+                        print(f"[匹配成功] 通过语义关键词匹配: '{keyword}' -> '{txt}'")
+                        return widget
+
         return None
 
     def _calculate_center(self, widget: Dict) -> Tuple[Optional[int], Optional[int]]:

@@ -39,6 +39,20 @@ class GUIAnalyzer:
         'android.widget.GridLayout', 'android.widget.TableLayout',
     }
 
+    # System package blacklist - filter out system UI and input methods
+    SYSTEM_PACKAGE_BLACKLIST: Set[str] = {
+        'com.android.systemui',           # Navigation bar, status bar
+        'com.android.inputmethod.latin',  # AOSP Keyboard
+        'com.google.android.inputmethod.latin',  # Gboard
+        'com.android.launcher',           # Home launcher
+        'com.android.settings',           # Settings overlay
+    }
+
+    # Input method package keywords (partial match)
+    IME_PACKAGE_KEYWORDS: Set[str] = {
+        'inputmethod', 'keyboard', 'ime', 'honeyboard', 'swiftkey'
+    }
+
     # 明确的交互组件标识符（出现在 class 名称中）
     # 包含这些关键词的控件直接判定为可交互
     INTERACTIVE_CLASS_KEYWORDS: Set[str] = {
@@ -51,6 +65,13 @@ class GUIAnalyzer:
         'QuickContactBadge', 'VideoView',
         # 'ImageView',  # ImageView 可能是可点击的图标
         # 'TextView',  # TextView 可能承载父级的点击事件
+    }
+
+    # WebView 输入控件标识符（用于识别 WebView 内的输入框）
+    WEBVIEW_INPUT_KEYWORDS: Set[str] = {
+        'input', 'field', 'edit', 'text', 'search', 'username',
+        'password', 'email', 'phone', 'login', 'name', 'title',
+        'content', 'message', 'comment', 'query'
     }
 
     # 交互属性列表 - 具有这些属性之一即为潜在可交互
@@ -68,8 +89,11 @@ class GUIAnalyzer:
         self.nodes: List[Dict] = []  # 存储解析后的控件列表
         self._seen_bounds: Set[str] = set()  # 用于去重的 bounds 集合
         self._fallback_mode: bool = False  # 当前是否处于降级模式
+        self._target_package: str = ""  # 目标应用包名（用于过滤系统控件）
+        self._system_page_detected: bool = False  # 系统页面跳转检测标志
+        self._detected_package: str = ""  # 检测到的跳转包名
 
-    def parse_xml(self, xml_path: str | Path) -> List[Dict]:
+    def parse_xml(self, xml_path: str | Path, target_package: str = "") -> List[Dict]:
         """
         解析 UI XML 文件，提取有效控件信息
 
@@ -79,9 +103,11 @@ class GUIAnalyzer:
         3. 父级事件冒泡处理
         4. 无意义布局容器过滤
         5. 降级解析模式 - 当严格过滤导致控件过少时自动放宽标准
+        6. 系统控件过滤 - 过滤掉系统UI和输入法控件
 
         Args:
             xml_path: XML 文件路径
+            target_package: 目标应用包名（过滤系统控件）
 
         Returns:
             包含所有有效控件信息的字典列表
@@ -89,12 +115,30 @@ class GUIAnalyzer:
         self.nodes = []
         self._seen_bounds = set()  # 重置去重集合
         self._fallback_mode = False  # 重置降级模式标记
+        self._target_package = target_package  # 设置目标包名
+        self._system_page_detected = False  # 重置系统页面跳转标志
+        self._detected_package = ""  # 重置检测到的包名
         xml_path = Path(xml_path)
 
         try:
             # 解析 XML 文件
             tree = ET.parse(xml_path)
             root = tree.getroot()
+
+            # ========== 新增：检测主要包名，判断系统页面跳转 ==========
+            if target_package:
+                primary_package = self._detect_primary_package(root)
+
+                # 如果主要包名与目标包名不匹配，可能是系统页面跳转
+                if primary_package and primary_package != target_package:
+                    # 检查是否是系统设置页面
+                    if primary_package == "com.android.settings":
+                        print(f"[XML解析] 检测到系统设置页面跳转: {primary_package}")
+                        print(f"[XML解析] 目标应用: {target_package}，建议按 back 返回")
+                        # 设置标志，让调用方知道发生了系统页面跳转
+                        self._system_page_detected = True
+                        self._detected_package = primary_package
+                        return []  # 返回空列表，让主循环处理
 
             # ========== 第一轮：严格模式遍历 ==========
             self._traverse_node(root, parent_chain=[])
@@ -157,6 +201,36 @@ class GUIAnalyzer:
                 self._traverse_node(child, new_chain, max_bubble_depth)
             return
 
+        # ========== 控件包名过滤 ==========
+        # 过滤系统 UI 和输入法控件
+        node_package = node.get("package", "")
+
+        # 检查是否在系统包名黑名单中
+        if node_package in self.SYSTEM_PACKAGE_BLACKLIST:
+            # 继续遍历子节点（系统容器可能包含 app 内容）
+            new_chain = parent_chain + [node]
+            for child in node:
+                self._traverse_node(child, new_chain, max_bubble_depth)
+            return
+
+        # 检查是否包含输入法关键词（部分匹配）
+        if node_package:
+            for keyword in self.IME_PACKAGE_KEYWORDS:
+                if keyword.lower() in node_package.lower():
+                    # 继续遍历子节点
+                    new_chain = parent_chain + [node]
+                    for child in node:
+                        self._traverse_node(child, new_chain, max_bubble_depth)
+                    return
+
+        # 如果指定了目标包名，只保留该包名的控件
+        if self._target_package and node_package and node_package != self._target_package:
+            # 继续遍历子节点（父容器可能是系统的，但子控件可能是 app 的）
+            new_chain = parent_chain + [node]
+            for child in node:
+                self._traverse_node(child, new_chain, max_bubble_depth)
+            return
+
         # ========== 第二道防线：布局容器判断 ==========
         class_name = node_info.get("class", "")
         is_ghost_container = self._is_ghost_container(class_name)
@@ -165,16 +239,23 @@ class GUIAnalyzer:
         has_interaction_attr = self._has_interaction_attributes(node)
         has_interactive_class = self._has_interactive_class_keyword(class_name)
 
+        # ========== 第三道防线扩展：WebView 输入控件检测 ==========
+        is_webview_input = self._is_webview_input_widget(node_info)
+
         # ========== 第四道防线：父级事件冒泡 ==========
         # 如果当前节点有文本但没有交互属性，尝试向上查找
         has_text = bool(node_info.get("original_text", "").strip() or
                        node_info.get("content_desc", "").strip())
         bubble_result = None
 
-        if has_text and not has_interaction_attr and not has_interactive_class:
+        if has_text and not has_interaction_attr and not has_interactive_class and not is_webview_input:
             bubble_result = self._bubble_find_interactive_parent(
                 node, parent_chain, max_bubble_depth
             )
+
+        # ========== 第四道防线扩展：大区域输入控件检测 ==========
+        # 检测大区域的文本控件（可能是输入框，如报告详情区域）
+        is_large_input_area = self._is_large_input_area(node_info)
 
         # ========== 综合判定：是否为有效交互节点 ==========
         is_valid_node = False
@@ -190,7 +271,16 @@ class GUIAnalyzer:
             is_valid_node = True
             validation_reason = "交互类名"
 
-        # 情况3：有文本内容，且（自身有交互 或 父级有交互）
+        # 情况2.5：WebView 输入控件（如 id='van-field-1-input'）
+        elif is_webview_input and not is_ghost_container:
+            is_valid_node = True
+            validation_reason = "WebView输入控件"
+            # 标记为可点击和可编辑
+            node_info["clickable"] = True
+            node_info["editable"] = True
+            node_info["focusable"] = True
+
+        # 情况3：有文本内容，且（自身有交互 或 父级有交互 或 大区域输入）
         elif has_text:
             if has_interaction_attr or has_interactive_class:
                 is_valid_node = True
@@ -201,6 +291,22 @@ class GUIAnalyzer:
                 # 使用冒泡找到的父节点的交互属性
                 node_info["clickable"] = True
                 node_info["bubble_parent"] = bubble_result["parent_class"]
+            elif is_large_input_area and not is_ghost_container:
+                # 大区域输入控件（如报告详情输入框）
+                is_valid_node = True
+                validation_reason = "大区域输入控件"
+                node_info["clickable"] = True
+                node_info["editable"] = True
+                node_info["focusable"] = True
+
+        # 情况3.5：无文本的大区域输入控件
+        elif is_large_input_area and not is_ghost_container:
+            is_valid_node = True
+            validation_reason = "大区域输入控件(无文本)"
+            # 标记为可点击和可编辑
+            node_info["clickable"] = True
+            node_info["editable"] = True
+            node_info["focusable"] = True
 
         # # 情况4：有有意义的 resource-id
         # elif self._has_meaningful_resource_id(node_info.get("resource_id", "")):
@@ -208,15 +314,33 @@ class GUIAnalyzer:
         #         is_valid_node = True
         #         validation_reason = "有意义的resource-id"
 
-        # ========== 去重处理 ==========
-        # 相同 bounds 的节点只保留一个（避免重复控件）
+        # ========== 去重处理（智能去重） ==========
+        # 改进：相同 bounds 但有不同重要属性的控件应该保留
         if is_valid_node:
             bounds = node_info.get("bounds", "")
-            if bounds in self._seen_bounds:
-                is_valid_node = False
-                validation_reason = "去重跳过"
+            resource_id = node_info.get("resource_id", "")
+            text = node_info.get("text", "") or node_info.get("original_text", "")
+
+            # 构建复合去重键：bounds + resource_id + text 的组合
+            # 如果 bounds 相同但 resource_id 或 text 不同，仍然保留
+            dedup_key = bounds
+            has_unique_identity = bool(resource_id or text)
+
+            if has_unique_identity:
+                # 有唯一标识（resource_id 或 text），使用复合键
+                dedup_key = f"{bounds}|{resource_id}|{text}"
+
+            if dedup_key in self._seen_bounds:
+                # 如果是纯 bounds 重复（没有唯一标识），才跳过
+                if not has_unique_identity:
+                    is_valid_node = False
+                    validation_reason = "去重跳过(bounds重复)"
+                # 如果有唯一标识但 dedup_key 重复，说明是完全相同的控件，跳过
+                else:
+                    is_valid_node = False
+                    validation_reason = "去重跳过(完全相同)"
             else:
-                self._seen_bounds.add(bounds)
+                self._seen_bounds.add(dedup_key)
 
         # ========== 最终判定 ==========
         if is_valid_node:
@@ -257,6 +381,29 @@ class GUIAnalyzer:
         # 物理坐标有效性验证（降级模式仍需验证）
         if not self._is_valid_bounds(node_info.get("bounds", "")):
             # 仍然遍历子节点
+            for child in node:
+                self._traverse_node_lenient(child, node)
+            return
+
+        # ========== 控件包名过滤（降级模式同样过滤系统控件）==========
+        node_package = node.get("package", "")
+
+        # 检查是否在系统包名黑名单中
+        if node_package in self.SYSTEM_PACKAGE_BLACKLIST:
+            for child in node:
+                self._traverse_node_lenient(child, node)
+            return
+
+        # 检查是否包含输入法关键词（部分匹配）
+        if node_package:
+            for keyword in self.IME_PACKAGE_KEYWORDS:
+                if keyword.lower() in node_package.lower():
+                    for child in node:
+                        self._traverse_node_lenient(child, node)
+                    return
+
+        # 如果指定了目标包名，只保留该包名的控件
+        if self._target_package and node_package and node_package != self._target_package:
             for child in node:
                 self._traverse_node_lenient(child, node)
             return
@@ -325,6 +472,7 @@ class GUIAnalyzer:
         content_desc = node.get("content-desc", "")
         resource_id = node.get("resource-id", "")
         bounds = node.get("bounds", "")
+        package = node.get("package", "")  # 提取 package 属性
 
         # 交互属性
         clickable = node.get("clickable", "false") == "true"
@@ -351,6 +499,7 @@ class GUIAnalyzer:
             "content_desc": content_desc,
             "resource_id": resource_id,
             "bounds": bounds,
+            "package": package,  # 添加 package 属性
             "center_x": center_x,
             "center_y": center_y,
             "position": position,  # "upper" 或 "lower"
@@ -435,6 +584,8 @@ class GUIAnalyzer:
         """
         获取兄弟节点的基本信息
 
+        改进：对于布局容器（LinearLayout等），穿透查找内部的文本内容
+
         Args:
             sibling: 兄弟节点
             position: 相对位置 ("before" 或 "after")
@@ -445,9 +596,20 @@ class GUIAnalyzer:
         sib_class = sibling.get("class", "")
         sib_text = sibling.get("text", "") or sibling.get("content-desc", "")
 
-        # 过滤无意义的布局容器
+        # 获取简单类名
         simple_class = self._get_simple_class_name(sib_class)
+
+        # 如果是布局容器，尝试从子节点中提取文本
         if simple_class in self.GHOST_WIDGET_BLACKLIST:
+            # 递归查找容器内的文本内容
+            nested_text = self._extract_text_from_container(sibling)
+            if nested_text:
+                # 返回一个虚拟的 TextView 信息，包含提取的文本
+                return {
+                    "class": "TextView",
+                    "text": nested_text,
+                    "position": position
+                }
             return None
 
         # 至少要有类名或文本才有意义
@@ -459,6 +621,52 @@ class GUIAnalyzer:
             "text": sib_text,
             "position": position
         }
+
+    def _extract_text_from_container(self, container: ET.Element, max_depth: int = 3) -> str:
+        """
+        从布局容器中递归提取文本内容
+
+        用于穿透 LinearLayout、FrameLayout 等容器，获取内部的 TextView 文本。
+        这对于 CheckBox/Switch 等控件获取相邻标签非常重要。
+
+        Args:
+            container: 布局容器节点
+            max_depth: 最大递归深度（避免无限递归）
+
+        Returns:
+            提取到的文本内容，多个文本用空格连接
+        """
+        if max_depth <= 0:
+            return ""
+
+        texts = []
+
+        # 先检查当前节点自身是否有文本
+        node_text = container.get("text", "") or container.get("content-desc", "")
+        if node_text and len(node_text) > 2:
+            texts.append(node_text)
+
+        # 递归遍历子节点
+        for child in container:
+            child_class = child.get("class", "")
+            simple_class = self._get_simple_class_name(child_class)
+
+            # 如果子节点也是布局容器，继续递归
+            if simple_class in self.GHOST_WIDGET_BLACKLIST:
+                nested_text = self._extract_text_from_container(child, max_depth - 1)
+                if nested_text:
+                    texts.append(nested_text)
+            else:
+                # 非 Ghost 容器，直接提取文本
+                child_text = child.get("text", "") or child.get("content-desc", "")
+                if child_text and len(child_text) > 2:
+                    texts.append(child_text)
+
+        # 返回最长的文本（通常是设置标签）
+        if texts:
+            return max(texts, key=len)
+
+        return ""
 
     def _get_simple_class_name(self, full_class_name: str) -> str:
         """
@@ -627,6 +835,127 @@ class GUIAnalyzer:
                 return True
 
         return False
+
+    def _is_webview_input_widget(self, node_info: Dict) -> bool:
+        """
+        检查是否为 WebView 输入控件
+
+        WebView 内的输入框通常有以下特征：
+        1. class 为 "android.widget.EditText" 或类似的输入类
+        2. resource-id 包含 'input', 'field', 'edit' 等关键词
+        3. 即使 clickable=false，也应该被识别为可交互
+
+        Args:
+            node_info: 控件信息字典
+
+        Returns:
+            True 表示是 WebView 输入控件
+        """
+        class_name = node_info.get("class", "")
+        resource_id = node_info.get("resource_id", "").lower()
+
+        # 检查是否为 EditText 类
+        is_edittext = "EditText" in class_name if class_name else False
+
+        # 检查 resource-id 是否包含输入相关关键词
+        has_input_id = False
+        if resource_id:
+            for keyword in self.WEBVIEW_INPUT_KEYWORDS:
+                if keyword in resource_id:
+                    has_input_id = True
+                    break
+
+        # 必须是 EditText 且有输入相关的 resource-id
+        if is_edittext and has_input_id:
+            return True
+
+        # 或者：有输入相关的 resource-id 且是可聚焦的文本类控件
+        # 这处理了 WebView 中 class 可能不是 EditText 的情况
+        is_text_widget = class_name and ("TextView" in class_name or "EditText" in class_name)
+        if has_input_id and is_text_widget:
+            return True
+
+        return False
+
+    def _is_large_input_area(self, node_info: Dict) -> bool:
+        """
+        检查是否为大区域输入控件
+
+        有些应用使用 TextView 来实现输入区域（如报告详情、评论框等），
+        这些控件通常：
+        1. 面积较大（高度超过阈值）
+        2. 可能包含提示文本（hint）或描述性文本
+        3. 即使 clickable=false，也应该被识别为可交互
+
+        Args:
+            node_info: 控件信息字典
+
+        Returns:
+            True 表示是大区域输入控件
+        """
+        bounds = node_info.get("bounds", "")
+        class_name = node_info.get("class", "")
+        text = node_info.get("text", "") or node_info.get("original_text", "")
+
+        # 只处理 TextView 类型的控件
+        if not class_name or "TextView" not in class_name:
+            return False
+
+        # 解析 bounds 获取高度
+        try:
+            import re
+            pattern = r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]'
+            match = re.match(pattern, bounds)
+            if not match:
+                return False
+
+            x1, y1, x2, y2 = map(int, match.groups())
+            width = x2 - x1
+            height = y2 - y1
+
+            # 大区域判定条件：
+            # 1. 高度超过 300 像素（可能是多行输入框）
+            # 2. 宽度超过 200 像素（排除细长条）
+            if height >= 300 and width >= 200:
+                print(f"[大区域检测] 发现大区域输入控件: bounds={bounds}, height={height}, text='{text[:30]}...'")
+                return True
+
+            # 或者：高度超过 200 且文本包含输入提示关键词
+            input_hint_keywords = ["details", "详情", "描述", "说明", "输入", "填写", "内容", "comment", "message", "report"]
+            if height >= 200:
+                text_lower = text.lower()
+                for keyword in input_hint_keywords:
+                    if keyword in text_lower:
+                        print(f"[大区域检测] 发现带提示的大区域控件: height={height}, keyword='{keyword}'")
+                        return True
+
+        except Exception as e:
+            pass
+
+        return False
+
+    def _detect_primary_package(self, root: ET.Element) -> Optional[str]:
+        """
+        检测 XML 中的主要包名（非系统包名）
+
+        通过统计各个包名的控件数量，返回数量最多的非系统包名。
+        用于检测是否发生了系统页面跳转。
+
+        Returns:
+            主要包名，如果无法确定则返回 None
+        """
+        package_counts: Dict[str, int] = {}
+
+        for node in root.iter():
+            pkg = node.get("package", "")
+            if pkg and pkg not in self.SYSTEM_PACKAGE_BLACKLIST:
+                package_counts[pkg] = package_counts.get(pkg, 0) + 1
+
+        if not package_counts:
+            return None
+
+        # 返回数量最多的包名
+        return max(package_counts, key=package_counts.get)
 
     def _has_meaningful_resource_id(self, resource_id: str) -> bool:
         """

@@ -1,171 +1,179 @@
 """
-全局探索记忆缓存模块
-实现跨会话的长期记忆，记录已探索的 Activity-Widget 路径
-防止大模型重复走同一条路径
+探索缓存模块
+用于记录已探索的 Activity-Widget 组合，避免重复测试
 """
 
-import json
+from typing import Dict, Set, Tuple
 from pathlib import Path
-from typing import Dict, List, Set, Optional
-from collections import defaultdict
-
-
-# 缓存文件路径
-CACHE_FILE = Path("temp_data/exploration_cache.json")
+import json
 
 
 class ExplorationCache:
     """
-    全局探索记忆缓存管理器
+    探索缓存类
 
-    数据结构：
-    {
-        "ActivityName1": ["WidgetName1", "WidgetName2", ...],
-        "ActivityName2": ["WidgetName3", ...],
-        ...
-
-    }
+    记录已探索的 Activity-Widget 组合，避免在同一测试会话中重复测试相同的控件。
     """
 
-    def __init__(self, cache_file: Path = CACHE_FILE):
+    def __init__(self, cache_file: Path = None):
         """
-        初始化缓存管理器
+        初始化探索缓存
 
         Args:
-            cache_file: 缓存文件路径
+            cache_file: 缓存文件路径（可选）
         """
-        self.cache_file = cache_file
-        self.cache: Dict[str, List[str]] = {}
-        self._load_cache()
+        self._cache: Dict[str, Set[str]] = {}  # activity -> set of widgets
+        self._cache_file = cache_file or Path("temp_data/exploration_cache.json")
+        self._total_explorations = 0
 
-    def _load_cache(self) -> None:
-        """从文件加载缓存"""
-        # 确保目录存在
-        self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+    def record_exploration(self, activity: str, widget: str) -> bool:
+        """
+        记录探索操作
 
-        if self.cache_file.exists():
-            try:
-                with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    self.cache = json.load(f)
-                print(f"[探索缓存] 已加载缓存，包含 {len(self.cache)} 个 Activity 的探索记录")
-            except (json.JSONDecodeError, IOError) as e:
-                print(f"[探索缓存] 加载失败，初始化为空: {e}")
-                self.cache = {}
-        else:
-            print("[探索缓存] 缓存文件不存在，初始化为空")
-            self.cache = {}
+        Args:
+            activity: Activity 名称
+            widget: Widget 名称
 
-    def _save_cache(self) -> None:
-        """保存缓存到文件"""
+        Returns:
+            True 如果是首次探索此组合，False 如果已探索过
+        """
+        if activity not in self._cache:
+            self._cache[activity] = set()
+
+        if widget in self._cache[activity]:
+            # 已探索过
+            return False
+
+        # 新探索
+        self._cache[activity].add(widget)
+        self._total_explorations += 1
+        return True
+
+    def has_explored(self, activity: str, widget: str) -> bool:
+        """
+        检查是否已探索过某组合
+
+        Args:
+            activity: Activity 名称
+            widget: Widget 名称
+
+        Returns:
+            True 如果已探索过，False 如果未探索过
+        """
+        return activity in self._cache and widget in self._cache[activity]
+
+    def get_explored_widgets(self, activity: str) -> Set[str]:
+        """
+        获取某 Activity 已探索过的 Widget 集合
+
+        Args:
+            activity: Activity 名称
+
+        Returns:
+            已探索的 Widget 集合
+        """
+        return self._cache.get(activity, set())
+
+    def get_total_explorations(self) -> int:
+        """
+        获取总探索次数
+
+        Returns:
+            总探索次数
+        """
+        return self._total_explorations
+
+    def clear_cache(self) -> None:
+        """
+        清空缓存
+        """
+        self._cache.clear()
+        self._total_explorations = 0
+        print("[探索缓存] 已清空")
+
+    def save_cache(self) -> None:
+        """
+        保存缓存到文件
+        """
         try:
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump(self.cache, f, ensure_ascii=False, indent=2)
-            print(f"[探索缓存] 已保存缓存到 {self.cache_file}")
-        except IOError as e:
+            # 转换 set 为 list 以便 JSON 序列化
+            cache_data = {
+                activity: list(widgets)
+                for activity, widgets in self._cache.items()
+            }
+            cache_data["_total"] = self._total_explorations
+
+            with open(self._cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=2)
+
+            print(f"[探索缓存] 已保存到 {self._cache_file}")
+        except Exception as e:
             print(f"[探索缓存] 保存失败: {e}")
 
-    def record_exploration(self, activity_name: str, widget_name: str) -> None:
+    def load_cache(self) -> bool:
         """
-        记录一次探索
-
-        Args:
-            activity_name: Activity 名称
-            widget_name: 控件名称
-        """
-        if not activity_name or not widget_name:
-            return
-
-        # 初始化 Activity 的列表
-        if activity_name not in self.cache:
-            self.cache[activity_name] = []
-
-        # 避免重复记录
-        if widget_name not in self.cache[activity_name]:
-            self.cache[activity_name].append(widget_name)
-            self._save_cache()
-            print(f"[探索缓存] 记录探索: {activity_name} -> {widget_name}")
-
-    def is_explored(self, activity_name: str, widget_name: str) -> bool:
-        """
-        检查某个控件是否已被探索
-
-        Args:
-            activity_name: Activity 名称
-            widget_name: 控件名称
+        从文件加载缓存
 
         Returns:
-            True 表示已探索，False 表示未探索
+            True 如果加载成功，False 如果失败
         """
-        if activity_name not in self.cache:
+        try:
+            if not self._cache_file.exists():
+                return False
+
+            with open(self._cache_file, 'r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+
+            # 转换 list 回 set
+            self._cache = {
+                activity: set(widgets)
+                for activity, widgets in cache_data.items()
+                if activity != "_total"
+            }
+            self._total_explorations = cache_data.get("_total", 0)
+
+            print(f"[探索缓存] 已加载，共 {self._total_explorations} 条记录")
+            return True
+        except Exception as e:
+            print(f"[探索缓存] 加载失败: {e}")
             return False
-        return widget_name in self.cache[activity_name]
-
-    def get_explored_widgets(self, activity_name: str) -> Set[str]:
-        """
-        获取某个 Activity 已探索的控件集合
-
-        Args:
-            activity_name: Activity 名称
-
-        Returns:
-            已探索控件名称集合
-        """
-        return set(self.cache.get(activity_name, []))
-
-    def mark_widget_as_explored(self, widget_name: str, activity_name: str) -> str:
-        """
-        给控件名称添加已探索标记
-
-        Args:
-            widget_name: 原始控件名称
-            activity_name: Activity 名称
-
-        Returns:
-            带标记的控件名称（如果已探索），否则返回原始名称
-        """
-        if self.is_explored(activity_name, widget_name):
-            return f"{widget_name} [ALREADY EXPLORED]"
-        return widget_name
 
     def get_statistics(self) -> Dict:
         """
         获取缓存统计信息
 
         Returns:
-            包含统计信息的字典
+            统计信息字典
         """
-        total_activities = len(self.cache)
-        total_widgets = sum(len(widgets) for widgets in self.cache.values())
         return {
-            "total_activities": total_activities,
-            "total_explored_widgets": total_widgets,
-            "activities": {k: len(v) for k, v in self.cache.items()}
+            "total_activities": len(self._cache),
+            "total_explorations": self._total_explorations,
+            "activities_detail": {
+                activity: len(widgets)
+                for activity, widgets in self._cache.items()
+            }
         }
-
-    def clear_cache(self) -> None:
-        """清空缓存"""
-        self.cache = {}
-        self._save_cache()
-        print("[探索缓存] 已清空所有探索记录")
 
 
 # 测试入口
 if __name__ == "__main__":
+    print("=" * 60)
+    print("ExplorationCache 测试")
+    print("=" * 60)
+
     cache = ExplorationCache()
 
-    # 测试记录
-    cache.record_exploration("MainActivity", "Search")
-    cache.record_exploration("MainActivity", "Login")
-    cache.record_exploration("SearchActivity", "SearchBox")
+    # 测试记录探索
+    print("\n[测试] 记录探索:")
+    print(f"  MainActivity + Button1: {cache.record_exploration('MainActivity', 'Button1')}")
+    print(f"  MainActivity + Button2: {cache.record_exploration('MainActivity', 'Button2')}")
+    print(f"  MainActivity + Button1 (重复): {cache.record_exploration('MainActivity', 'Button1')}")
 
     # 测试查询
-    print(f"\nMainActivity 已探索: {cache.get_explored_widgets('MainActivity')}")
-    print(f"Search 是否已探索: {cache.is_explored('MainActivity', 'Search')}")
-    print(f"Register 是否已探索: {cache.is_explored('MainActivity', 'Register')}")
+    print("\n[测试] 查询探索状态:")
+    print(f"  MainActivity + Button1 已探索: {cache.has_explored('MainActivity', 'Button1')}")
+    print(f"  MainActivity + Button3 已探索: {cache.has_explored('MainActivity', 'Button3')}")
 
-    # 测试标记
-    print(f"\n标记测试: {cache.mark_widget_as_explored('Search', 'MainActivity')}")
-    print(f"标记测试: {cache.mark_widget_as_explored('Register', 'MainActivity')}")
-
-    # 统计
-    print(f"\n统计信息: {cache.get_statistics()}")
+    # 测试统计
+    print("\n[测试] 统计信息:")
+    print(cache.get_statistics())

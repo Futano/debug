@@ -17,19 +17,216 @@ GPTDroid 测试入口 - Outer Loop 主程序
 """
 
 import time
+import json
 from typing import Dict
 from pathlib import Path
 
 from env_interactor import ADBController, ActionExecutor
 from gui_extractor import GUIAnalyzer, ManifestParser
-from llm_agent import PromptGenerator, LLMClient, TestingSequenceMemorizer
+from llm_agent import PromptGenerator, LLMClient, TestingSequenceMemorizer, UserContext  # NEW: UserContext
+from llm_agent.supervisor import SupervisorModel
+from llm_agent.bug_analysis_engine import BugReport, BugSeverity, BugCategory  # NEW: Bug 报告类型
+from llm_agent.multimodal_llm_client import MultimodalLLMClient  # NEW: 多模态 LLM
+from llm_agent.screenshot_manager import ScreenshotManager, ScreenshotData  # NEW: 截图管理
 from llm_agent.exploration_cache import ExplorationCache
-from llm_agent.test_logger import get_logger, TestLogger
+from llm_agent.test_logger import get_logger
 
 
 # ==================== 配置参数 ====================
 MAX_STEPS = 300           # 最大探索步数
-STEP_WAIT_TIME = 2      # 每步操作后的等待时间（秒）
+STEP_WAIT_TIME = 1   # 每步操作后的等待时间（秒）
+
+
+# ==================== 交互式输入函数 ====================
+
+def get_user_input(default_app_name: str = "") -> UserContext:
+    """
+    获取用户输入的测试上下文信息
+
+    Args:
+        default_app_name: 默认应用名称（从 Manifest 解析）
+
+    Returns:
+        UserContext: 用户输入的上下文信息
+    """
+    print("\n" + "=" * 60)
+    print("  测试配置")
+    print("=" * 60)
+
+    # 1. 应用名称
+    default_display = default_app_name or "未知应用"
+    app_name_input = input(f"应用名称 [{default_display}]: ").strip()
+    app_name = app_name_input if app_name_input else default_app_name
+
+    # 2. 用户自定义说明（一句话）
+    print("\n请输入测试说明（可选，直接回车跳过）:")
+    print("例如: 重点测试登录和支付功能")
+    user_note = input("> ").strip()
+
+    # 构建并返回用户上下文
+    user_context = UserContext(
+        app_name=app_name,
+        user_note=user_note
+    )
+
+    # 显示配置摘要
+    print("\n" + "-" * 60)
+    print(f"应用: {user_context.app_name}")
+    if user_context.user_note:
+        print(f"说明: {user_context.user_note}")
+    print("-" * 60)
+
+    return user_context
+
+
+def _handle_llm_bug_report(
+    components,
+    parsed_action,
+    current_activity: str,
+    screenshot_data,
+    step_result: Dict,
+    results: Dict,
+    supervisor,
+    memory_manager
+) -> bool:
+    """
+    处理 LLM 报告的 Bug（集成监管者审查）
+
+    当 parsed_action.bug_detected == True 时触发，暂停测试循环，
+    由监管者审查 Bug 的真实性。
+
+    Args:
+        components: 测试组件集合（包含 bug_analysis_engine 等）
+        parsed_action: 解析后的动作，包含 bug_description
+        current_activity: 当前 Activity
+        screenshot_data: 当前截图数据
+        step_result: 步骤结果字典
+        results: 测试结果汇总字典
+        supervisor: 监管者模型实例
+        memory_manager: 记忆管理器实例
+
+    Returns:
+        bool: True 表示应终止测试，False 表示继续测试
+    """
+    from datetime import datetime as dt
+
+    bug_desc = parsed_action.bug_description or {}
+    bug_type = bug_desc.get("type", "unknown")
+    bug_severity = bug_desc.get("severity", "Error")
+    bug_message = bug_desc.get("description", "Bug detected by LLM")
+
+    print(f"\n{'!' * 60}")
+    print(f"[Bug检测] LLM 发现 Bug!")
+    print(f"   类型: {bug_type}, 严重程度: {bug_severity}")
+    print(f"   描述: {bug_message[:80]}...")
+
+    # 映射严重程度到 BugSeverity
+    severity_map = {
+        "Critical": BugSeverity.CRITICAL,
+        "Error": BugSeverity.ERROR,
+        "Warning": BugSeverity.WARNING,
+        "Info": BugSeverity.INFO
+    }
+    mapped_severity = severity_map.get(bug_severity, BugSeverity.ERROR)
+
+    # 映射 Bug 类型到 BugCategory
+    category_map = {
+        "crash": BugCategory.CRASH,
+        "calculation_error": BugCategory.CALCULATION_ERROR,
+        "data_inconsistency": BugCategory.DATA_INCONSISTENCY,
+        "function_anomaly": BugCategory.FUNCTION_ANOMALY,
+        "unknown": BugCategory.UNKNOWN
+    }
+    mapped_category = category_map.get(bug_type, BugCategory.UNKNOWN)
+
+    # 构建 BugReport
+    # 包含所有历史操作记录（用于完整复现路径）
+    all_operation_history = list(memory_manager.operation_history)
+
+    bug_report = BugReport(
+        bug_id=f"BUG-{dt.now().strftime('%Y%m%d')}-{memory_manager.get_step_count():04d}",
+        timestamp=dt.now(),
+        severity=mapped_severity,
+        category=mapped_category,
+        title=bug_message[:100],
+        description=bug_message,
+        activity=current_activity,
+        operation=parsed_action.operation or "",
+        widget=parsed_action.widget or "",
+        screenshot_paths=[str(screenshot_data.path)] if screenshot_data else [],
+        operation_history=all_operation_history  # 包含所有历史操作
+    )
+
+    # ==================== 监管者审查 ====================
+    print("\n[监管者] 暂停测试，调用监管者审查 Bug 报告...")
+
+    context = {
+        'operation_history': list(memory_manager.operation_history),
+        'last_expected_result': memory_manager.get_expected_result(),
+        'current_activity': current_activity,
+    }
+
+    review_result = supervisor.check_false_positive(
+        bug_report=bug_report,
+        context=context,
+        screenshots=[screenshot_data] if screenshot_data else None
+    )
+
+    # 处理审查结果
+    if review_result.is_false_positive:
+        print(f"[监管者] 判定为假阳性：{review_result.false_positive_reason}")
+        print("[监管者] 跳过此 Bug 报告，继续测试")
+
+        # 记录假阳性案例供学习
+        memory_manager.record_false_positive_case(
+            bug_description=bug_message,
+            reason=review_result.false_positive_reason,
+            confidence=review_result.confidence
+        )
+
+        return False  # 不终止测试
+
+    print(f"[监管者] 确认真实 Bug: {review_result.reasoning}")
+
+    # ========== 立即保存真实 Bug 报告（包含所有历史操作）==========
+    print(f"\n[Bug报告] 立即保存真实 Bug 报告...")
+    print(f"[Bug报告] 包含 {len(all_operation_history)} 条历史操作记录")
+
+    # 加载截图为 base64
+    bug_report.load_screenshots_as_base64()
+
+    # 保存 Bug 报告
+    report_dir = Path("bug_reports")
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    # 保存 Markdown 格式
+    md_path = report_dir / f"{bug_report.bug_id}.md"
+    with open(md_path, 'w', encoding='utf-8') as f:
+        f.write(bug_report.to_markdown())
+    print(f"[Bug报告] Markdown 已保存: {md_path}")
+
+    # 保存 JSON 格式（包含完整数据，便于程序读取）
+    json_path = report_dir / f"{bug_report.bug_id}.json"
+    with open(json_path, 'w', encoding='utf-8') as json_file:
+        json.dump(bug_report.to_dict(), json_file, ensure_ascii=False, indent=2)
+    print(f"[Bug报告] JSON 已保存: {json_path}")
+
+    # 记录到测试日志
+    from llm_agent.test_logger import get_logger
+    bug_logger = get_logger()
+    bug_logger.log(f"真实 Bug 已保存: {bug_report.bug_id}", "ERROR")
+    bug_logger.log(f"  类型: {mapped_category.value}, 严重程度: {mapped_severity.value}", "ERROR")
+    bug_logger.log(f"  位置: {current_activity} - {parsed_action.operation}", "ERROR")
+    bug_logger.log(f"  描述: {bug_message[:100]}...", "ERROR")
+
+    results["bug_count"] = results.get("bug_count", 0) + 1
+
+    # 严重 Bug 终止测试
+    if bug_report.severity == BugSeverity.CRITICAL:
+        print("[Bug检测] 发现严重 Bug，终止测试循环")
+        return True
+
+    return False
 
 
 def print_substep_header(substep_name: str) -> None:
@@ -100,12 +297,27 @@ def run_outer_loop() -> Dict:
 
     # 将记忆管理器传递给 PromptGenerator
     prompt_generator = PromptGenerator(
-        memory_manager=memory_manager,
-        exploration_cache=exploration_cache
+        memory_manager=memory_manager
     )
 
     llm_client = LLMClient()
     action_executor = ActionExecutor()
+
+    # ========== NEW: 初始化监管者组件 ==========
+    # 初始化多模态 LLM 客户端（监管者使用）
+    multimodal_llm = MultimodalLLMClient()
+
+    # 初始化截图管理器
+    screenshot_manager = ScreenshotManager(adb_controller=adb_controller)
+
+    # 初始化监管者模型
+    supervisor = SupervisorModel(
+        multimodal_llm=multimodal_llm,
+        screenshot_manager=screenshot_manager,
+        review_interval=10,
+        min_confidence=0.7
+    )
+    print("[监管者] Supervisor 初始化完成")
 
     # 获取当前应用信息
     print("\n[应用信息] 正在获取当前应用...")
@@ -113,9 +325,14 @@ def run_outer_loop() -> Dict:
     manifest_parser = ManifestParser()
     app_info = manifest_parser.get_or_parse(current_package)
 
+    # 获取默认应用名称
+    default_app_name = app_info.app_name if app_info else current_package.split('.')[-1]
+
+    # ========== 获取用户输入的测试配置 ==========
+    user_context = get_user_input(default_app_name=default_app_name)
+    prompt_generator.set_user_context(user_context)
+
     if app_info:
-        prompt_generator.set_app_name(app_info.app_name)
-        print(f"[应用信息] 应用名称: {app_info.app_name}")
         print(f"[应用信息] 包名: {app_info.package_name}")
         print(f"[应用信息] Activity 数量: {len(app_info.activities)}")
 
@@ -124,8 +341,7 @@ def run_outer_loop() -> Dict:
         memory_manager.register_activities(activity_names)
         print(f"[应用信息] 已注册 {len(activity_names)} 个 Activities")
     else:
-        prompt_generator.set_app_name(current_package.split('.')[-1])
-        print(f"[应用信息] 无法解析 Manifest，使用包名作为应用名称")
+        print(f"[应用信息] 无法解析 Manifest")
 
     print("[初始化] 组件初始化完成")
 
@@ -240,12 +456,52 @@ def run_outer_loop() -> Dict:
             # ---------- e. 获取 LLM 决策 ----------
             print_substep_header("e. 获取 LLM 决策")
 
-            llm_response = llm_client.get_decision(test_prompt)
+            # 获取系统提示词
+            system_prompt = prompt_generator.build_system_prompt()
+
+            llm_response = llm_client.get_decision(test_prompt, system_prompt)
 
             print(f"[成功] LLM 响应: {llm_response}")
 
             # 记录到日志
             logger.log(f"LLM 决策: {llm_response[:200]}...")
+
+            # ========== NEW: 先解析 LLM 响应检查 Bug（不执行动作）==========
+            # Bug 断言审查必须基于触发断言时的上下文快照，而不是执行后续动作后的新状态
+            parsed_action_preview = action_executor.parse_action_only(llm_response)
+
+            if parsed_action_preview and parsed_action_preview.bug_detected:
+                # Bug 检测：立即在当前状态截图（触发断言时的上下文快照）
+                print(f"\n{'!' * 60}")
+                print(f"[Bug检测] LLM 发现 Bug!（在执行动作之前）")
+                print(f"   类型: {parsed_action_preview.bug_description.get('type', 'unknown')}")
+                print(f"   描述: {parsed_action_preview.bug_description.get('description', 'N/A')[:80]}...")
+                logger.log(f"LLM 报告 Bug（审查前）: {parsed_action_preview.bug_description}", "WARNING")
+
+                # 在当前状态截图（触发断言时的上下文快照，而非执行动作后的新状态）
+                context_snapshot = screenshot_manager.capture(activity_name=current_activity)
+                print(f"[监管者] 使用当前状态截图进行审查（触发断言时的上下文）")
+
+                # 调用监管者审查
+                should_terminate = _handle_llm_bug_report(
+                    components=None,
+                    parsed_action=parsed_action_preview,
+                    current_activity=current_activity,
+                    screenshot_data=context_snapshot,
+                    step_result=step_result,
+                    results=results,
+                    supervisor=supervisor,
+                    memory_manager=memory_manager
+                )
+
+                if should_terminate:
+                    step_result["status"] = "bug_terminated"
+                    step_result["error"] = "Critical bug detected, test terminated"
+                    results["step_details"].append(step_result)
+                    break
+
+                # 如果监管者判定为假阳性，记录后继续执行动作
+                # 如果监管者判定为真实 Bug，已记录，继续执行动作
 
             # ---------- f. 执行动作 ----------
             print_substep_header("f. 执行动作")
@@ -301,8 +557,8 @@ def run_outer_loop() -> Dict:
                             widgets, current_activity, failed_widget
                         )
 
-                        # 获取 LLM 重新决策
-                        retry_response = llm_client.get_decision(feedback_prompt)
+                        # 获取 LLM 重新决策（使用相同的系统提示词）
+                        retry_response = llm_client.get_decision(feedback_prompt, system_prompt)
                         print(f"[重试] LLM 响应: {retry_response}")
 
                         # 尝试执行重试决策
@@ -425,7 +681,9 @@ def run_outer_loop() -> Dict:
 
             # 如果是多输入操作，添加所有输入的 widgets
             if parsed_action and parsed_action.input_sequence:
-                for widget_name, _ in parsed_action.input_sequence:
+                for item in parsed_action.input_sequence:
+                    # input_sequence 是三元组: (widget_name, input_text, content_desc)
+                    widget_name = item[0] if isinstance(item, tuple) else item
                     widgets_tested.append({
                         "name": widget_name,
                         "visits": memory_manager.get_widget_visits(current_activity).get(widget_name, 0)
@@ -445,6 +703,41 @@ def run_outer_loop() -> Dict:
                 exploration_cache.record_exploration(current_activity, widget_name)
 
             print(f"[成功] 记忆已更新，当前步骤数: {memory_manager.get_step_count()}")
+
+            # ========== NEW: 定期监管者漏检检测 ==========
+            current_step = memory_manager.get_step_count()
+            if supervisor.should_trigger_review(current_step):
+                print(f"\n[监管者] 触发定期审查 (步骤 {current_step})")
+
+                # 截取当前截图
+                review_screenshot = screenshot_manager.capture(activity_name=current_activity)
+
+                review_context = {
+                    'current_activity': current_activity,
+                    'operation_history': list(memory_manager.operation_history),
+                    'pending_verifications': []
+                }
+
+                review_result = supervisor.check_missed_bugs(
+                    context=review_context,
+                    screenshots=[review_screenshot] if review_screenshot else None
+                )
+
+                # NEW: 传递建议给探索者模型
+                if review_result.suggestions:
+                    prompt_generator.set_supervisor_suggestions(review_result.suggestions)
+                    print(f"[监管者] 已传递 {len(review_result.suggestions)} 条建议给探索者")
+
+                # 处理发现的漏检 Bug
+                if review_result.missed_bugs:
+                    print(f"[监管者] 发现 {len(review_result.missed_bugs)} 个漏检 Bug")
+                    results["missed_bug_count"] = results.get("missed_bug_count", 0) + len(review_result.missed_bugs)
+
+                    # 记录漏检 Bug（可选：保存为 Bug 报告）
+                    for bug in review_result.missed_bugs:
+                        logger.log(f"漏检 Bug: {bug.get('type', 'unknown')} - {bug.get('description', '')}", "WARNING")
+                else:
+                    print("[监管者] 未发现漏检 Bug")
 
             # 标记步骤成功
             step_result["status"] = "success"

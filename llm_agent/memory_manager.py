@@ -11,6 +11,8 @@
 
 from typing import List, Dict, Optional
 from collections import deque
+from datetime import datetime
+from .logger_config import memory_logger
 
 
 class TestingSequenceMemorizer:
@@ -26,7 +28,7 @@ class TestingSequenceMemorizer:
     遵循 GPTDroid 论文的记忆机制设计
     """
 
-    MAX_HISTORY_STEPS = 5
+    MAX_HISTORY_STEPS = 10
 
     def __init__(self):
         """初始化测试序列记忆器"""
@@ -52,6 +54,13 @@ class TestingSequenceMemorizer:
         # 步骤计数器
         self.step_counter: int = 0
 
+        # 上一步操作的预期结果（用于 Bug 检测）
+        self.last_expected_result: Optional[str] = None
+        self.last_actual_result: Optional[str] = None
+
+        # 当前页面描述（用于记录操作前的页面状态）
+        self.current_page_description: Optional[str] = None
+
     # ==================== 配置方法 ====================
 
     def set_app_name(self, app_name: str) -> None:
@@ -68,21 +77,18 @@ class TestingSequenceMemorizer:
         for activity in activities:
             self.register_activity(activity)
 
-    def register_activities(self, activities: List[str]) -> None:
-        """批量注册 Activities"""
-        for activity in activities:
-            self.register_activity(activity)
-
     # ==================== 记录方法 ====================
 
     def record_activity_visit(self, activity_name: str) -> None:
         """记录 Activity 访问"""
+        memory_logger.info(f"Activity访问: {activity_name}")
         self.register_activity(activity_name)
         self.activity_info[activity_name]["visits"] += 1
         self.activity_info[activity_name]["status"] = "visited"
 
     def record_widget_visit(self, activity_name: str, widget_identifier: str) -> None:
         """记录 Widget 访问"""
+        memory_logger.debug(f"Widget访问: {widget_identifier} @ {activity_name}")
         if activity_name not in self.widget_visits:
             self.widget_visits[activity_name] = {}
         self.widget_visits[activity_name][widget_identifier] = \
@@ -94,7 +100,10 @@ class TestingSequenceMemorizer:
         widgets_tested: List[Dict] = None,
         operation: str = None,
         target_widget: str = None,
-        success: bool = True
+        success: bool = True,
+        expected_result: str = None,
+        page_description: str = None,
+        visual_description: str = None
     ) -> None:
         """
         记录操作历史
@@ -105,6 +114,9 @@ class TestingSequenceMemorizer:
             operation: 操作类型
             target_widget: 目标控件
             success: 是否成功
+            expected_result: 操作预期结果（可选）
+            page_description: 页面描述（来自 LLM 的 Page_Description 字段）
+            visual_description: 视觉描述（兼容旧字段）
         """
         self.step_counter += 1
 
@@ -112,14 +124,23 @@ class TestingSequenceMemorizer:
         if widgets_tested is None:
             widgets_tested = self.get_widgets_tested(activity_name)
 
+        # 优先使用 page_description，否则使用 visual_description
+        description = page_description or visual_description or self.current_page_description
+
         # 添加到操作历史
         self.operation_history.appendleft({
             "activity_name": activity_name,
             "widgets_tested": widgets_tested or [],
             "operation": operation or "unknown",
             "target_widget": target_widget or "unknown",
-            "success": success
+            "success": success,
+            "expected_result": expected_result or self.last_expected_result,
+            "page_description": description,
+            "visual_description": description  # 保持兼容性
         })
+
+        # 重置当前页面描述（已被使用）
+        self.current_page_description = None
 
         # 同时更新 Activity 和 Widget 访问
         if activity_name:
@@ -168,6 +189,7 @@ class TestingSequenceMemorizer:
             function_name: 功能名称
             status: 状态 ("testing" 或 "tested")
         """
+        memory_logger.info(f"功能状态更新: {function_name} -> {status}")
         if function_name not in self.explored_functions:
             self.explored_functions[function_name] = {"visits": 0, "status": status}
 
@@ -177,7 +199,6 @@ class TestingSequenceMemorizer:
         # 更新当前功能
         self.current_function = function_name
         self.current_function_status = status
-        print(f"[功能更新] {function_name} ({status})")
 
     def infer_function_from_activity(self, activity_name: str) -> Optional[str]:
         """
@@ -236,6 +257,128 @@ class TestingSequenceMemorizer:
         self.current_function = function_name
         self.current_function_status = status
 
+    def set_current_page_description(self, description: str) -> None:
+        """
+        设置当前页面描述（操作前调用）
+
+        Args:
+            description: 页面描述（来自 LLM 的 Thought 或控件摘要）
+        """
+        self.current_page_description = description
+
+    def generate_page_summary(self, activity_name: str, widgets: List[Dict] = None) -> str:
+        """
+        根据当前页面信息生成页面摘要
+
+        Args:
+            activity_name: 当前 Activity 名称
+            widgets: 当前页面的控件列表（可选）
+
+        Returns:
+            页面摘要字符串
+        """
+        parts = [f"页面: {activity_name}"]
+
+        if widgets:
+            # 统计控件类型
+            type_counts = {}
+            key_widgets = []
+            for widget in widgets:
+                category = widget.get("category", "Unknown")
+                type_counts[category] = type_counts.get(category, 0) + 1
+
+                # 记录关键控件（可交互的）
+                if category in ["Button", "EditText"]:
+                    text = widget.get("text", "")
+                    if text and len(text) < 20:
+                        key_widgets.append(f"{text}({category})")
+
+            # 添加控件统计
+            type_str = ", ".join([f"{k}:{v}" for k, v in type_counts.items()])
+            parts.append(f"控件: {type_str}")
+
+            # 添加关键控件（最多5个）
+            if key_widgets:
+                parts.append(f"关键控件: {', '.join(key_widgets[:5])}")
+
+        return " | ".join(parts)
+
+    # ==================== 预期结果管理（Bug 检测）====================
+
+    def set_expected_result(self, expected_result: str) -> None:
+        """
+        设置当前操作的预期结果
+
+        Args:
+            expected_result: 预期的操作结果描述
+        """
+        self.last_expected_result = expected_result
+        self.last_actual_result = None  # 重置实际结果
+        print(f"[预期结果] 设置: {expected_result}")
+
+    def get_expected_result(self) -> Optional[str]:
+        """获取上一步操作的预期结果"""
+        return self.last_expected_result
+
+    def update_actual_result(self, actual_result: str) -> None:
+        """
+        更新实际结果（用于与预期结果对比）
+
+        Args:
+            actual_result: 实际的操作结果描述
+        """
+        self.last_actual_result = actual_result
+        print(f"[实际结果] 更新: {actual_result}")
+
+    def get_actual_result(self) -> Optional[str]:
+        """获取上一步操作的实际结果"""
+        return self.last_actual_result
+
+    def has_pending_verification(self) -> bool:
+        """检查是否有待验证的预期结果"""
+        return self.last_expected_result is not None and self.last_actual_result is None
+
+    def clear_verification_state(self) -> None:
+        """清空预期/实际结果状态"""
+        self.last_expected_result = None
+        self.last_actual_result = None
+
+    # ==================== 假阳性案例记录（监管者功能）====================
+
+    def record_false_positive_case(
+        self,
+        bug_description: str,
+        reason: str,
+        confidence: float
+    ) -> None:
+        """
+        记录假阳性案例供学习
+
+        当监管者判定 LLM 报告的 Bug 为假阳性时，记录此案例以供后续分析。
+
+        Args:
+            bug_description: 原 Bug 描述
+            reason: 假阳性判定原因
+            confidence: 监管者判定置信度
+        """
+        if not hasattr(self, 'false_positive_cases'):
+            self.false_positive_cases = []
+
+        self.false_positive_cases.append({
+            'step': self.get_step_count(),
+            'bug_description': bug_description,
+            'reason': reason,
+            'confidence': confidence,
+            'timestamp': datetime.now().timestamp()
+        })
+
+        memory_logger.info(f"假阳性案例已记录：{bug_description[:50]}...")
+        print(f"[假阳性记录] 步骤 {self.get_step_count()}: {bug_description[:50]}...")
+
+    def get_false_positive_cases(self) -> List[Dict]:
+        """获取所有假阳性案例"""
+        return getattr(self, 'false_positive_cases', [])
+
     # ==================== 数据获取方法 ====================
 
     def get_activities_info(self) -> List[Dict]:
@@ -246,16 +389,15 @@ class TestingSequenceMemorizer:
         ]
 
     def get_covered_activities(self) -> List[Dict]:
-        """获取已覆盖的 Activities"""
-        covered = []
-        seen = set()
-        for op in reversed(list(self.operation_history)):
-            activity = op.get("activity_name")
-            if activity and activity not in seen:
-                seen.add(activity)
-                info = self.activity_info.get(activity, {})
-                covered.append({"name": activity, "visit_time": info.get("visits", 0)})
-        return list(reversed(covered))
+        """获取所有 Activities 信息（包含未访问的）
+
+        注意：此方法返回所有注册的 Activity，不仅仅是已访问的。
+        用于在提示词中显示完整的 Activity 覆盖情况。
+        """
+        return [
+            {"name": name, "visit_time": info.get("visits", 0), "status": info.get("status", "unvisited")}
+            for name, info in self.activity_info.items()
+        ]
 
     def get_explored_functions(self) -> Dict[str, Dict]:
         """获取已探索的功能"""
@@ -273,6 +415,23 @@ class TestingSequenceMemorizer:
         """获取指定 Activity 已测试的 Widgets"""
         widget_visits = self.get_widget_visits(activity_name)
         return [{"name": name, "visits": visits} for name, visits in widget_visits.items()]
+
+    def is_first_activity_visit(self, activity_name: str) -> bool:
+        """
+        判断 Activity 是否首次访问
+
+        用于渐进式披露策略：首次访问时不显示 widget 历史访问信息
+
+        Args:
+            activity_name: Activity 名称
+
+        Returns:
+            True: 首次访问（visits == 0）
+            False: 返回访问（visits > 0）
+        """
+        if activity_name not in self.activity_info:
+            return True  # 未注册的 Activity 视为首次
+        return self.activity_info[activity_name].get("visits", 0) == 0
 
     # ==================== 统计方法 ====================
 
@@ -345,6 +504,23 @@ class TestingSequenceMemorizer:
         self.current_function = None
         self.current_function_status = None
         self.step_counter = 0
+        self.last_expected_result = None
+        self.last_actual_result = None
+        self.current_page_description = None
+        print("[记忆清空] 所有测试历史已清除")
+
+    def clear_memory(self) -> None:
+        """清空所有记忆记录"""
+        self.activity_info.clear()
+        self.widget_visits.clear()
+        self.explored_functions.clear()
+        self.operation_history.clear()
+        self.current_function = None
+        self.current_function_status = None
+        self.step_counter = 0
+        self.last_expected_result = None
+        self.last_actual_result = None
+        self.current_page_description = None
         print("[记忆清空] 所有测试历史已清除")
 
 

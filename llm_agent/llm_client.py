@@ -5,9 +5,13 @@
 """
 
 import os
+import re
 import sys
 import time
 from typing import Optional, Tuple
+
+# 导入统一日志配置
+from .logger_config import llm_logger, safe_print, print_separator, SEPARATOR_WIDTH
 
 # 导入 Token 监控器
 try:
@@ -46,21 +50,6 @@ for _var in _proxy_vars:
             # 直接删除，不用 safe_print（此时函数还未定义）
             os.environ.pop(_var, None)
 
-
-def safe_print(msg: str):
-    """
-    安全打印函数，解决 Windows 终端 UnicodeEncodeError 问题
-
-    Args:
-        msg: 要打印的消息
-    """
-    try:
-        print(msg)
-    except UnicodeEncodeError:
-        # 如果 UTF-8 打印失败，尝试用 ASCII 替换不可编码字符
-        safe_msg = msg.encode('ascii', 'replace').decode('ascii')
-        print(safe_msg)
-
 # 尝试导入 OpenAI 库（可选依赖）
 try:
     from openai import OpenAI
@@ -97,11 +86,13 @@ class LLMClient:
     # 默认安全动作：当 API 调用失败时返回（ReAct JSON 格式）
     SAFE_FALLBACK_ACTION = '''```json
 {
-  "Thought": "API call failed, using safe fallback action to continue exploration.",
-  "Action_Type": "back",
-  "Target_Widget": null,
+  "Function": "fallback",
+  "Status": "No",
+  "Operation": "back",
+  "Widget": null,
   "Input_Content": null,
-  "Status": "Fallback action due to API error"
+  "Expected_Result": "Navigate back to continue exploration",
+  "Bug_Detected": false
 }
 ```'''
 
@@ -109,7 +100,7 @@ class LLMClient:
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model: Optional[str] = None
+        model: Optional[str] =None,
     ):
         """
         初始化 LLM 客户端
@@ -122,10 +113,11 @@ class LLMClient:
                       如果不提供则从环境变量 OPENAI_BASE_URL 读取
             model: 使用的模型名称，默认从环境变量读取或使用 gpt-3.5-turbo
         """
+
         # 从环境变量或参数读取配置，并清理非法字符
         self.api_key = clean_env_var(api_key or os.environ.get("OPENAI_API_KEY"))
         self.base_url = clean_env_var(base_url or os.environ.get("OPENAI_BASE_URL"))
-        self.model = clean_env_var(model or os.environ.get("OPENAI_MODEL", "gpt-3.5-turbo"))
+        self.model = clean_env_var(model or os.environ.get("OPENAI_MODEL"))
 
         self.client = None
         self._is_mock_mode = True
@@ -201,8 +193,8 @@ class LLMClient:
         try:
             # ========== 打印发送给模型的提示词 ==========
             safe_print("\n" + "=" * 70)
-            safe_print("[LLM客户端] 发送给模型的提示词:")
-            safe_print("=" * 70)
+            safe_print("[LLM客户端] 用户提示词:")
+            safe_print("-" * 70)
             safe_print(prompt)
             safe_print("=" * 70 + "\n")
 
@@ -229,16 +221,23 @@ class LLMClient:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                temperature=0.3,  # 降低随机性，提高决策一致性
+                temperature=0.7,  # 降低随机性，提高决策一致性
                 max_tokens=500,   # 足够输出完整的 ReAct JSON 响应
-                stream=True       # 启用流式响应以监控首token延迟
+                stream=True,     # 启用流式响应以监控首token延迟
+                extra_body = {
+                    "top_k": 20,
+                    "enable_thinking": True,  # 启用模型原生思考功能
+                }
             )
 
-            # 提取响应内容（流式）
-            result_chunks = []
+            # 提取响应内容（流式）- 分别处理思考过程和最终回复
+            reasoning_chunks = []  # 思考过程 (reasoning_content)
+            result_chunks = []     # 最终回复 (content)
             first_token_received = False
 
             for chunk in response:
+                delta = chunk.choices[0].delta
+
                 # 记录首token时间
                 if not first_token_received:
                     monitor.record_first_token()
@@ -246,11 +245,21 @@ class LLMClient:
                     safe_print(f"[Token监控] 首Token延迟: {first_token_latency:.0f} ms")
                     first_token_received = True
 
-                # 提取内容
-                if chunk.choices and chunk.choices[0].delta.content:
-                    result_chunks.append(chunk.choices[0].delta.content)
+                # 收集思考内容 (原生 thinking 输出)
+                if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                    reasoning_chunks.append(delta.reasoning_content)
+                    print(delta.reasoning_content, end="", flush=True)  # 实时打印思考过程
 
+                # 收集最终回复内容
+                if hasattr(delta, 'content') and delta.content:
+                    result_chunks.append(delta.content)
+
+            reasoning_content = ''.join(reasoning_chunks)
             result = ''.join(result_chunks).strip()
+
+            # 如果有思考内容，打印分隔线
+            if reasoning_content:
+                print("\n" + "=" * 20 + "完整回复" + "=" * 20 + "\n")
 
             # 计算生成时间
             total_time = time.time() - request_start_time
@@ -339,7 +348,6 @@ class LLMClient:
         safe_print("[LLM客户端] 使用模拟模式返回测试决策")
 
         # 尝试从 prompt 中提取控件名称
-        import re
 
         # 提取 "The widgets which can be operated are" 后面的控件列表
         widgets_match = re.search(
@@ -365,11 +373,13 @@ class LLMClient:
                 # 返回 ReAct JSON 格式
                 mock_response = f'''```json
 {{
-  "Thought": "Mock mode: clicking the first available widget for testing.",
-  "Action_Type": "click",
-  "Target_Widget": "{first_widget}",
+  "Function": "mock_test",
+  "Status": "No",
+  "Operation": "click",
+  "Widget": "{first_widget}",
   "Input_Content": null,
-  "Status": "Mock mode testing"
+  "Expected_Result": "Mock mode testing",
+  "Bug_Detected": false
 }}
 ```'''
 
@@ -385,11 +395,13 @@ class LLMClient:
         # 默认模拟响应（ReAct JSON 格式）
         mock_response = '''```json
 {
-  "Thought": "Mock mode: default action to search for testing.",
-  "Action_Type": "click",
-  "Target_Widget": "Search",
+  "Function": "mock_default",
+  "Status": "No",
+  "Operation": "click",
+  "Widget": "Search",
   "Input_Content": null,
-  "Status": "Mock mode default"
+  "Expected_Result": "Mock mode default action",
+  "Bug_Detected": false
 }
 ```'''
 
