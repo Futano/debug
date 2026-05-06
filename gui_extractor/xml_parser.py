@@ -93,6 +93,14 @@ class GUIAnalyzer:
         self._system_page_detected: bool = False  # 系统页面跳转检测标志
         self._detected_package: str = ""  # 检测到的跳转包名
 
+    def is_system_page_detected(self) -> bool:
+        """返回最近一次解析是否检测到系统/外部页面跳转。"""
+        return self._system_page_detected
+
+    def get_detected_package(self) -> str:
+        """返回最近一次解析检测到的非目标包名。"""
+        return self._detected_package
+
     def parse_xml(self, xml_path: str | Path, target_package: str = "") -> List[Dict]:
         """
         解析 UI XML 文件，提取有效控件信息

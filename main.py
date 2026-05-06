@@ -25,7 +25,7 @@ from env_interactor import ADBController, ActionExecutor
 from gui_extractor import GUIAnalyzer, ManifestParser
 from llm_agent import PromptGenerator, LLMClient, TestingSequenceMemorizer, UserContext  # NEW: UserContext
 from llm_agent.supervisor import SupervisorModel
-from llm_agent.bug_analysis_engine import BugReport, BugSeverity, BugCategory  # NEW: Bug 报告类型
+from llm_agent.bug_analysis_engine import BugAnalysisEngine, BugReport, BugSeverity, BugCategory  # NEW: Bug 报告类型
 from llm_agent.multimodal_llm_client import MultimodalLLMClient  # NEW: 多模态 LLM
 from llm_agent.screenshot_manager import ScreenshotManager, ScreenshotData  # NEW: 截图管理
 from llm_agent.exploration_cache import ExplorationCache
@@ -143,6 +143,8 @@ def _handle_llm_bug_report(
     # 包含所有历史操作记录（用于完整复现路径）
     all_operation_history = list(memory_manager.operation_history)
 
+    current_expected_result = parsed_action.expected_result or memory_manager.get_expected_result()
+
     bug_report = BugReport(
         bug_id=f"BUG-{dt.now().strftime('%Y%m%d')}-{memory_manager.get_step_count():04d}",
         timestamp=dt.now(),
@@ -154,6 +156,14 @@ def _handle_llm_bug_report(
         operation=parsed_action.operation or "",
         widget=parsed_action.widget or "",
         screenshot_paths=[str(screenshot_data.path)] if screenshot_data else [],
+        additional_info={
+            "detected_by": "explorer_llm",
+            "source": "explorer_bug_assertion",
+            "expected_result": current_expected_result,
+            "page_description": parsed_action.page_description,
+            "llm_thought": parsed_action.thought,
+            "function_name": parsed_action.function_name,
+        },
         operation_history=all_operation_history  # 包含所有历史操作
     )
 
@@ -162,7 +172,10 @@ def _handle_llm_bug_report(
 
     context = {
         'operation_history': list(memory_manager.operation_history),
-        'last_expected_result': memory_manager.get_expected_result(),
+        # Bug 断言发生在执行动作之前，此时当前 LLM 响应还没进入 memory。
+        # 因此优先使用本次响应中的 Expected_Result，再回退到上一轮记忆。
+        'last_expected_result': current_expected_result,
+        'page_description': parsed_action.page_description,
         'current_activity': current_activity,
     }
 
@@ -301,14 +314,25 @@ def run_outer_loop() -> Dict:
     )
 
     llm_client = LLMClient()
-    action_executor = ActionExecutor()
+
+    # 初始化截图管理器
+    screenshot_manager = ScreenshotManager(adb_controller=adb_controller)
+
+    # 统一 Bug 报告引擎：崩溃和逻辑 Bug 都使用 BugReport 的 JSON/Markdown 结构
+    bug_analysis_engine = BugAnalysisEngine(
+        adb_controller=adb_controller,
+        screenshot_manager=screenshot_manager
+    )
+
+    # 动作执行器注入 BugAnalysisEngine，避免崩溃时只生成旧版 TXT 报告
+    action_executor = ActionExecutor(
+        bug_analysis_engine=bug_analysis_engine,
+        screenshot_manager=screenshot_manager
+    )
 
     # ========== NEW: 初始化监管者组件 ==========
     # 初始化多模态 LLM 客户端（监管者使用）
     multimodal_llm = MultimodalLLMClient()
-
-    # 初始化截图管理器
-    screenshot_manager = ScreenshotManager(adb_controller=adb_controller)
 
     # 初始化监管者模型
     supervisor = SupervisorModel(
@@ -322,6 +346,7 @@ def run_outer_loop() -> Dict:
     # 获取当前应用信息
     print("\n[应用信息] 正在获取当前应用...")
     current_package = adb_controller.get_current_package()
+    target_package = current_package if current_package and current_package != "unknown.package" else ""
     manifest_parser = ManifestParser()
     app_info = manifest_parser.get_or_parse(current_package)
 
@@ -407,9 +432,21 @@ def run_outer_loop() -> Dict:
             # ---------- b. 解析 UI 控件 ----------
             print_substep_header("b. 解析 UI 控件")
 
-            widgets = gui_analyzer.parse_xml(ui_file)
+            widgets = gui_analyzer.parse_xml(ui_file, target_package=target_package)
 
             if not widgets:
+                if gui_analyzer.is_system_page_detected():
+                    detected_package = gui_analyzer.get_detected_package() or "unknown"
+                    print(f"[外部页面] 检测到已跳转到非目标页面: {detected_package}")
+                    print("[外部页面] 按 Back 返回被测应用，下一步继续探索")
+                    adb_controller.go_back()
+                    time.sleep(STEP_WAIT_TIME)
+                    step_result["status"] = "skipped"
+                    step_result["error"] = f"External/system page detected: {detected_package}"
+                    results["skipped_steps"] += 1
+                    results["step_details"].append(step_result)
+                    continue
+
                 print("[警告] 未提取到有效控件，跳过当前步骤")
                 step_result["status"] = "skipped"
                 step_result["error"] = "No widgets found"
@@ -520,7 +557,8 @@ def run_outer_loop() -> Dict:
                 execute_result = action_executor.execute_action(
                     llm_response, widgets, adb_controller,
                     memory_manager=memory_manager,
-                    activity_name=current_activity
+                    activity_name=current_activity,
+                    target_package=target_package
                 )
 
                 # 安全取值
@@ -565,7 +603,8 @@ def run_outer_loop() -> Dict:
                         retry_result = action_executor.execute_action(
                             retry_response, widgets, adb_controller,
                             memory_manager=memory_manager,
-                            activity_name=current_activity
+                            activity_name=current_activity,
+                            target_package=target_package
                         )
 
                         retry_success = retry_result[0] if retry_result else False
@@ -650,7 +689,7 @@ def run_outer_loop() -> Dict:
             try:
                 ui_file_after = adb_controller.dump_ui()
                 if ui_file_after:
-                    widgets_after = gui_analyzer.parse_xml(ui_file_after)
+                    widgets_after = gui_analyzer.parse_xml(ui_file_after, target_package=target_package)
                     activity_after = adb_controller.get_current_activity()
 
                     state_after = compute_ui_state_fingerprint(widgets_after)
@@ -690,12 +729,17 @@ def run_outer_loop() -> Dict:
                     })
 
             # 记录操作历史
+            if parsed_action and parsed_action.expected_result:
+                memory_manager.set_expected_result(parsed_action.expected_result)
+
             memory_manager.record_operation(
                 activity_name=current_activity,
                 widgets_tested=widgets_tested,
                 operation=operation,
                 target_widget=widget_name,
-                success=True
+                success=True,
+                expected_result=parsed_action.expected_result if parsed_action else None,
+                page_description=parsed_action.page_description if parsed_action else None
             )
 
             # 记录到探索缓存
@@ -712,10 +756,18 @@ def run_outer_loop() -> Dict:
                 # 截取当前截图
                 review_screenshot = screenshot_manager.capture(activity_name=current_activity)
 
+                latest_history = memory_manager.get_operation_history()
+                latest_operation = latest_history[0] if latest_history else None
+                pending_verifications = (
+                    [latest_operation]
+                    if latest_operation and latest_operation.get("expected_result")
+                    else []
+                )
+
                 review_context = {
                     'current_activity': current_activity,
                     'operation_history': list(memory_manager.operation_history),
-                    'pending_verifications': []
+                    'pending_verifications': pending_verifications
                 }
 
                 review_result = supervisor.check_missed_bugs(

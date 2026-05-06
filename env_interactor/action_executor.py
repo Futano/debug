@@ -961,6 +961,19 @@ class ActionExecutor:
                 # Yes = new function being tested, No = continuing existing function
                 action.function_status = "testing" if status_value == "yes" else "tested"
                 print(f"[解析] Function Status: {action.function_status}")
+            expected_match = re.search(
+                r'(?:Expected_Result|Expected Result|ExpectedResult):\s*"([^"]+)"',
+                llm_response,
+                re.IGNORECASE
+            )
+            if expected_match:
+                action.expected_result = expected_match.group(1).strip()
+
+            expected_match = re.search(
+                r'(?:Expected_Result|Expected Result|ExpectedResult):\s*(.+?)(?=\n|Bug_Detected|Bug Description|$)',
+                llm_response,
+                re.IGNORECASE | re.DOTALL
+            )
 
             # ========== 提取 Operation ==========
             # 优先匹配带双引号的格式，回退兼容不带引号的格式

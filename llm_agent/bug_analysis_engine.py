@@ -460,6 +460,11 @@ class BugAnalysisEngine:
             widget=widget,
             crash_log=crash_log,
             screenshot_paths=screenshot_paths,
+            additional_info={
+                "detected_by": "crash_detector",
+                "source": "crash_oracle",
+                "target_package": target_package,
+            },
             operation_history=operation_history or []
         )
 
